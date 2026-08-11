@@ -80,7 +80,7 @@ const App = () => {
     <div className="app">
       <header className="header">
         <h1>Achievement Holders</h1>
-        <p className="subtitle">Live from the 42 API — Morocco campuses only</p>
+        <p className="subtitle">Moroccan students who've traveled to 42 Paris this year</p>
       </header>
 
       <div className="filters-row">
