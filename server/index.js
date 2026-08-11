@@ -205,6 +205,27 @@ const mapAchievementHolder = (item) => {
   };
 };
 
+// Raw holder objects from GET /v2/achievements/:id/users already carry `kind`/`staff?` —
+// verified live (mika/giuseppe both showed kind:"admin", staff?:true). Filtering these out
+// costs nothing extra: no per-holder call needed, just reading fields already in hand.
+const isStaffHolder = (item) => {
+  const u = item.user || item;
+  return u['staff?'] === true || (u.kind && u.kind !== 'student');
+};
+
+// Server-side "achieved this year" filter. GET /v2/achievements_users supports
+// filter[achievement_id] AND range[created_at] directly (verified live) — one paginated
+// query gets every this-year achiever's login in a handful of calls, no per-holder lookup.
+const fetchThisYearLogins = async (achievementId) => {
+  const year = new Date().getFullYear();
+  const raw = await fetchAllPages(
+    `/achievements_users?filter[achievement_id]=${achievementId}` +
+      `&range[created_at]=${year}-01-01T00:00:00.000Z,${year + 1}-01-01T00:00:00.000Z`,
+    { maxPages: 15 },
+  );
+  return new Set(raw.map((r) => r.login));
+};
+
 // The unlock date lives on the join record, not the achievement or the user — verified
 // live: GET /v2/achievements_users?filter[user_id]=X&filter[achievement_id]=Y returns
 // created_at (e.g. "2026-03-27T11:28:02.104Z"), the real moment that achievement was earned.
@@ -258,6 +279,16 @@ app.get('/api/achievements/holders', async (req, res) => {
     const achievement = await findAchievementByName(name);
     if (!achievement) { return res.status(404).json({ error: 'ACHIEVEMENT_NOT_FOUND' }); }
 
+    // Both filters below cost no per-holder calls: staff exclusion reads fields already on
+    // the raw holder object, and the year filter is one shared, paginated lookup reused
+    // across every campus.
+    const thisYearLogins = await fetchThisYearLogins(achievement.id);
+    const filterHolders = (rawHolders) =>
+      rawHolders
+        .filter((item) => !isStaffHolder(item))
+        .filter((item) => thisYearLogins.has((item.user || item).login))
+        .map(mapAchievementHolder);
+
     if (requestedCampusId) {
       // Single campus selected — flat list, no grouping needed. Achieved date is NOT
       // fetched here (that would be 1 extra call per holder and make the whole list slow) —
@@ -266,7 +297,7 @@ app.get('/api/achievements/holders', async (req, res) => {
         `/achievements/${achievement.id}/users?filter[primary_campus_id]=${requestedCampusId}`,
         { maxPages: 5 },
       );
-      return res.json({ achievement, holders: rawHolders.map(mapAchievementHolder) });
+      return res.json({ achievement, holders: filterHolders(rawHolders) });
     }
 
     // "All Morocco": the holder objects carry no campus field at all (verified live), so the
@@ -278,7 +309,7 @@ app.get('/api/achievements/holders', async (req, res) => {
         `/achievements/${achievement.id}/users?filter[primary_campus_id]=${c.id}`,
         { maxPages: 5 },
       );
-      groups.push({ campus: { id: c.id, name: c.name }, holders: rawHolders.map(mapAchievementHolder) });
+      groups.push({ campus: { id: c.id, name: c.name }, holders: filterHolders(rawHolders) });
     }
     res.json({ achievement, groups });
   } catch (err) {
