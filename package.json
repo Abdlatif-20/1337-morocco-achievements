@@ -2,10 +2,17 @@
   "name": "1337-morocco-students",
   "version": "1.0.0",
   "private": true,
+  "type": "module",
   "scripts": {
     "install:all": "npm install --prefix server && npm install --prefix client",
     "dev": "concurrently -n server,client -c blue,green \"npm run dev --prefix server\" \"npm run dev --prefix client\"",
-    "build": "npm run build --prefix client"
+    "build": "npm run build --prefix client",
+    "vercel-build": "npm install --prefix client && npm run build --prefix client"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2"
   },
   "devDependencies": {
     "concurrently": "^9.1.0"

@@ -298,6 +298,12 @@ app.get('/api/students/:login/profile', async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`1337 Morocco Students API listening on http://localhost:${PORT}`);
-});
+// Exported so a serverless wrapper (see /api/[...path].js) can reuse this exact app without
+// binding a port — app.listen() only happens in local dev, below.
+export default app;
+
+if (process.env.VERCEL !== '1') {
+  app.listen(PORT, () => {
+    console.log(`1337 Morocco Students API listening on http://localhost:${PORT}`);
+  });
+}
