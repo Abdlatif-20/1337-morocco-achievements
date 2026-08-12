@@ -1,11 +1,21 @@
 import 'dotenv/config';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import express from 'express';
 import cors from 'cors';
-import { getValidToken } from './auth.js';
 import { MOROCCAN_CAMPUSES } from './campuses.js';
+import {
+  getSession,
+  setSessionCookie,
+  clearSessionCookie,
+  setOAuthStateCookie,
+  getOAuthStateCookie,
+  clearOAuthStateCookie,
+} from './session.js';
 
 const PORT = process.env.PORT || 4000;
 const API_BASE = 'https://api.intra.42.fr/v2';
+const AUTHORIZE_URL = 'https://api.intra.42.fr/oauth/authorize';
+const TOKEN_URL = 'https://api.intra.42.fr/oauth/token';
 
 // 42's API rate-limits at ~2 req/s — every outgoing call is chained through this queue so
 // concurrent requests from the frontend don't burst past that limit.
@@ -23,9 +33,20 @@ const throttle = () => {
   return dispatch;
 };
 
+// Holds the CURRENT VISITOR's own access token for the duration of one request. Every data
+// route runs inside `requestContext.run({ token }, ...)` (set by the `requireAuth`
+// middleware below) so apiGetOnce can read the right token without every helper function in
+// this file (fetchUserRaw, fetchAllPages, etc.) needing a token parameter threaded through
+// by hand. This is the mechanism that makes 42 API calls run AS the logged-in visitor,
+// instead of the app's own client_credentials token — per the explicit requirement that
+// data be fetched using each visitor's own 42 account, not the app owner's.
+const requestContext = new AsyncLocalStorage();
+
 const apiGetOnce = async (path) => {
   await throttle();
-  const token = await getValidToken();
+  const token = requestContext.getStore()?.token;
+  if (!token) { const err = new Error('NO_REQUEST_TOKEN'); err.status = 401; throw err; }
+
   const response = await fetch(`${API_BASE}${path}`, {
     headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
   });
@@ -236,16 +257,144 @@ const fetchAchievedAt = async (userId, achievementId) => {
   return Array.isArray(data) && data[0]?.created_at ? data[0].created_at : null;
 };
 
+// --- Visitor OAuth (authorization_code grant) -------------------------------------------
+// The app's FT_CLIENT_ID/FT_CLIENT_SECRET identify the same registered 42 API application
+// as before, but every data-fetching request below runs using the VISITOR's own access
+// token (obtained here), not an app-level client_credentials token — each visitor's calls
+// are made as themselves against 42's API.
+const getRedirectUri = (req) => `${req.protocol}://${req.get('host')}/api/auth/callback`;
+
+const exchangeCodeForToken = async (code, redirectUri) => {
+  const body = new URLSearchParams({
+    grant_type: 'authorization_code',
+    client_id: process.env.FT_CLIENT_ID,
+    client_secret: process.env.FT_CLIENT_SECRET,
+    code,
+    redirect_uri: redirectUri,
+  });
+  const response = await fetch(TOKEN_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body,
+  });
+  if (!response.ok) {
+    const text = await response.text().catch(() => response.statusText);
+    throw new Error(`AUTH_FAILED:${response.status}:${text}`);
+  }
+  return response.json();
+};
+
+const refreshAccessToken = async (refreshToken) => {
+  const body = new URLSearchParams({
+    grant_type: 'refresh_token',
+    client_id: process.env.FT_CLIENT_ID,
+    client_secret: process.env.FT_CLIENT_SECRET,
+    refresh_token: refreshToken,
+  });
+  const response = await fetch(TOKEN_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body,
+  });
+  if (!response.ok) { throw new Error('REFRESH_FAILED'); }
+  return response.json();
+};
+
+// Gates every data route: no session → 401 (client sends the visitor to /api/auth/login).
+// Refreshes an expiring access token before use and rewrites the session cookie with the
+// refreshed tokens, so a visitor doesn't get logged out just because their token aged out
+// mid-session.
+const requireAuth = async (req, res, next) => {
+  const session = getSession(req);
+  if (!session) { return res.status(401).json({ error: 'UNAUTHENTICATED' }); }
+
+  let { accessToken, refreshToken, expiresAt, user } = session;
+  if (Date.now() > expiresAt - 60_000) {
+    try {
+      const data = await refreshAccessToken(refreshToken);
+      accessToken = data.access_token;
+      refreshToken = data.refresh_token || refreshToken;
+      expiresAt = Date.now() + (data.expires_in || 7200) * 1000;
+      setSessionCookie(res, { accessToken, refreshToken, expiresAt, user });
+    } catch {
+      clearSessionCookie(res);
+      return res.status(401).json({ error: 'SESSION_EXPIRED' });
+    }
+  }
+
+  requestContext.run({ token: accessToken }, () => next());
+};
+
 const app = express();
+app.set('trust proxy', true); // Vercel terminates TLS in front of the function; needed so req.protocol reflects the real https scheme for the OAuth redirect_uri.
 app.use(cors());
 
 app.get('/api/campuses', (req, res) => {
   res.json(MOROCCAN_CAMPUSES);
 });
 
+app.get('/api/auth/login', (req, res) => {
+  const state = Math.random().toString(36).slice(2) + Date.now().toString(36);
+  setOAuthStateCookie(res, state);
+  const params = new URLSearchParams({
+    client_id: process.env.FT_CLIENT_ID,
+    redirect_uri: getRedirectUri(req),
+    response_type: 'code',
+    scope: 'public',
+    state,
+  });
+  res.redirect(`${AUTHORIZE_URL}?${params}`);
+});
+
+app.get('/api/auth/callback', async (req, res) => {
+  const { code, state, error: oauthError } = req.query;
+  if (oauthError) { return res.redirect(`/?authError=${encodeURIComponent(String(oauthError))}`); }
+
+  const expectedState = getOAuthStateCookie(req);
+  clearOAuthStateCookie(res);
+  if (!code || !state || state !== expectedState) {
+    return res.redirect('/?authError=invalid_state');
+  }
+
+  try {
+    const tokenData = await exchangeCodeForToken(code, getRedirectUri(req));
+    const accessToken = tokenData.access_token;
+    const refreshToken = tokenData.refresh_token;
+    const expiresAt = Date.now() + (tokenData.expires_in || 7200) * 1000;
+
+    const meResponse = await fetch(`${API_BASE}/me`, {
+      headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' },
+    });
+    if (!meResponse.ok) { throw new Error('ME_FETCH_FAILED'); }
+    const me = await meResponse.json();
+    const user = {
+      id: me.id,
+      login: me.login,
+      displayName: me.usual_full_name || me.displayname || me.login,
+      imageUrl: me.image?.link || me.image?.versions?.medium || null,
+    };
+
+    setSessionCookie(res, { accessToken, refreshToken, expiresAt, user });
+    res.redirect('/');
+  } catch {
+    res.redirect('/?authError=login_failed');
+  }
+});
+
+app.get('/api/auth/me', (req, res) => {
+  const session = getSession(req);
+  if (!session) { return res.status(401).json({ error: 'UNAUTHENTICATED' }); }
+  res.json({ user: session.user });
+});
+
+app.post('/api/auth/logout', (req, res) => {
+  clearSessionCookie(res);
+  res.json({ ok: true });
+});
+
 // Lazy, single-student lookup — called only when a card is actually opened, not for every
 // holder in a list. One extra call to the real join resource.
-app.get('/api/achievements/achieved-date', async (req, res) => {
+app.get('/api/achievements/achieved-date', requireAuth, async (req, res) => {
   const login = String(req.query.login || '').trim().toLowerCase();
   const name = String(req.query.name || '').trim();
   if (!login || !name) { return res.status(400).json({ error: 'MISSING_PARAMS' }); }
@@ -262,7 +411,7 @@ app.get('/api/achievements/achieved-date', async (req, res) => {
   }
 });
 
-app.get('/api/achievements/holders', async (req, res) => {
+app.get('/api/achievements/holders', requireAuth, async (req, res) => {
   const name = String(req.query.name || '').trim();
   if (!name) { return res.status(400).json({ error: 'EMPTY_NAME' }); }
 
@@ -317,7 +466,7 @@ app.get('/api/achievements/holders', async (req, res) => {
   }
 });
 
-app.get('/api/students/:login/profile', async (req, res) => {
+app.get('/api/students/:login/profile', requireAuth, async (req, res) => {
   const login = String(req.params.login || '').trim().toLowerCase();
   if (!login) { return res.status(400).json({ error: 'EMPTY_LOGIN' }); }
 
@@ -329,7 +478,7 @@ app.get('/api/students/:login/profile', async (req, res) => {
   }
 });
 
-// Exported so a serverless wrapper (see /api/[...path].js) can reuse this exact app without
+// Exported so a serverless wrapper (see /api/*.js) can reuse this exact app without
 // binding a port — app.listen() only happens in local dev, below.
 export default app;
 
