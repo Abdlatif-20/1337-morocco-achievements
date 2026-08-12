@@ -163,6 +163,13 @@ const App = () => {
         {authError && <p className="error-text">{authError}</p>}
         <p className="status-text">Log in with your 42 intra account to see the data.</p>
         <a className="login-btn" href={LOGIN_URL}>Login with 42</a>
+        <footer className="footer">
+          <p className="footer-label">Built by</p>
+          <p className="footer-name">Abdellatyf en neiymy</p>
+          <p className="footer-meta">
+            aben-nei · <a href="https://profile.intra.42.fr/users/aben-nei" target="_blank" rel="noreferrer">42 Profile</a>
+          </p>
+        </footer>
       </div>
     );
   }
@@ -260,6 +267,14 @@ const App = () => {
           onClose={closeDetail}
         />
       )}
+
+      <footer className="footer">
+        <p className="footer-label">Built by</p>
+        <p className="footer-name">Abdellatyf en neiymy</p>
+        <p className="footer-meta">
+          aben-nei · <a href="https://profile.intra.42.fr/users/aben-nei" target="_blank" rel="noreferrer">42 Profile</a>
+        </p>
+      </footer>
     </div>
   );
 };

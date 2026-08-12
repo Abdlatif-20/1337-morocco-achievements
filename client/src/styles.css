@@ -692,3 +692,39 @@ body {
   border-radius: 8px;
   cursor: pointer;
 }
+
+.footer {
+  margin-top: 48px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+  text-align: center;
+}
+
+.footer p {
+  margin: 2px 0;
+}
+
+.footer-label {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.footer-name {
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.footer-meta {
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.footer-meta a {
+  color: var(--primary);
+  text-decoration: none;
+}
+
+.footer-meta a:hover {
+  text-decoration: underline;
+}
