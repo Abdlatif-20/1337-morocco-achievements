@@ -124,25 +124,6 @@ const App = () => {
     loadHolders(selectedCampusId);
   }, [me, selectedCampusId]);
 
-  // Keeps the list actually live: a background poll every 60s re-fetches the current
-  // campus's holders and silently swaps them in — no spinner, no cache reuse — so a newly
-  // joined student shows up without the visitor needing to click Refresh.
-  useEffect(() => {
-    if (!me) { return; }
-    const interval = setInterval(() => {
-      const key = selectedCampusId || '';
-      fetchAchievementHolders(DEFAULT_ACHIEVEMENT, selectedCampusId || null)
-        .then((res) => {
-          setCache((prev) => ({ ...prev, [key]: res }));
-          setAchievementResult((prev) => (prev ? res : prev));
-        })
-        .catch((err) => {
-          if (err.status === 401) { setMe(null); }
-        });
-    }, 60_000);
-    return () => clearInterval(interval);
-  }, [me, selectedCampusId]);
-
   // The achieved date is fetched lazily here, only for the one student actually opened —
   // not for every card in the list (that was an earlier slowdown).
   const openHolderDetail = (holder) => {
