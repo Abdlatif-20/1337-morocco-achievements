@@ -300,6 +300,36 @@ const refreshAccessToken = async (refreshToken) => {
   return response.json();
 };
 
+// GET /v2/me right after the token exchange — unlike every data route below, this runs
+// before requestContext exists, so it can't go through apiGet. It still needs the same
+// throttle + 429 backoff: without it, a 429 here (this app's shared 2 req/s cap, easily hit
+// if a visitor double-clicks Login or retries fast) fails instantly and every immediate
+// retry 429s again since nothing ever backs off.
+const fetchMe = async (accessToken) => {
+  await throttle();
+  const response = await fetch(`${API_BASE}/me`, {
+    headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' },
+  });
+  if (response.ok) { return response.json(); }
+
+  if (response.status === 429) {
+    const retryAfterSeconds = Number(response.headers.get('retry-after')) || 3;
+    if (retryAfterSeconds <= MAX_AUTO_RETRY_WAIT_SECONDS) {
+      await new Promise((r) => setTimeout(r, retryAfterSeconds * 1000));
+      await throttle();
+      const retryResponse = await fetch(`${API_BASE}/me`, {
+        headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' },
+      });
+      if (retryResponse.ok) { return retryResponse.json(); }
+      const body = await retryResponse.text().catch(() => '');
+      throw new Error(`ME_FETCH_FAILED:${retryResponse.status}:${body.slice(0, 300)}`);
+    }
+  }
+
+  const body = await response.text().catch(() => '');
+  throw new Error(`ME_FETCH_FAILED:${response.status}:${body.slice(0, 300)}`);
+};
+
 // Gates every data route: no session → 401 (client sends the visitor to /api/auth/login).
 // Refreshes an expiring access token before use and rewrites the session cookie with the
 // refreshed tokens, so a visitor doesn't get logged out just because their token aged out
@@ -362,14 +392,7 @@ app.get('/api/auth/callback', async (req, res) => {
     const refreshToken = tokenData.refresh_token;
     const expiresAt = Date.now() + (tokenData.expires_in || 7200) * 1000;
 
-    const meResponse = await fetch(`${API_BASE}/me`, {
-      headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' },
-    });
-    if (!meResponse.ok) {
-      const body = await meResponse.text().catch(() => '');
-      throw new Error(`ME_FETCH_FAILED:${meResponse.status}:${body.slice(0, 300)}`);
-    }
-    const me = await meResponse.json();
+    const me = await fetchMe(accessToken);
     const user = {
       id: me.id,
       login: me.login,
