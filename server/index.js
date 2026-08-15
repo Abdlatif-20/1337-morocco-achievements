@@ -257,12 +257,102 @@ const fetchAchievedAt = async (userId, achievementId) => {
   return Array.isArray(data) && data[0]?.created_at ? data[0].created_at : null;
 };
 
+// --- Worldwide croissant achievers, home campus outside France -------------------------
+// Same achievement used by the Morocco tab ("Je voudrais un croissant"), but here: no
+// campus filter (worldwide), this-year only (fetchThisYearLogins, same as the Morocco tab),
+// and excluding anyone whose home campus is in France — reusing the achievement-lookup
+// helpers above rather than a new data source. Fetched 20 at a time (WORLDWIDE_BATCH_LIMIT)
+// via an opaque {page, offset} cursor instead of one big fetch — the client requests another
+// batch ("Load more") only when it actually wants one.
+const WORLDWIDE_BATCH_LIMIT = 20;
+const PROFILE_BATCH_SIZE = 15;
+const MAX_ACHIEVEMENT_HOLDER_PAGES = 10;
+
+// this-year achiever logins don't change within a browsing session — cached per achievement
+// so clicking "Load more" repeatedly doesn't redo this paginated lookup every time.
+const thisYearLoginsCache = new Map();
+
+const getThisYearLoginsCached = async (achievementId) => {
+  const key = `${achievementId}:${new Date().getFullYear()}`;
+  if (!thisYearLoginsCache.has(key)) {
+    thisYearLoginsCache.set(key, await fetchThisYearLogins(achievementId));
+  }
+  return thisYearLoginsCache.get(key);
+};
+
+// Resumes from `cursor` ({page, offset} into that page's filtered candidate list) and
+// returns up to WORLDWIDE_BATCH_LIMIT holders plus the cursor to resume from next, or
+// nextCursor: null once there's nothing left (or MAX_ACHIEVEMENT_HOLDER_PAGES is exhausted).
+const fetchWorldwideNonFranceHoldersPage = async (achievementId, thisYearLogins, cursor) => {
+  let pageNum = cursor.page;
+  let offset = cursor.offset;
+  const holders = [];
+
+  while (holders.length < WORLDWIDE_BATCH_LIMIT && pageNum <= MAX_ACHIEVEMENT_HOLDER_PAGES) {
+    const { data: page } = await apiGet(
+      `/achievements/${achievementId}/users?page[size]=100&page[number]=${pageNum}`,
+    );
+    if (!Array.isArray(page) || page.length === 0) { return { holders, nextCursor: null }; }
+
+    const seen = new Set();
+    const candidates = [];
+    for (const item of page) {
+      if (isStaffHolder(item)) { continue; }
+      const u = item.user || item;
+      if (!u.login || seen.has(u.login) || !thisYearLogins.has(u.login)) { continue; }
+      seen.add(u.login);
+      candidates.push(u.login);
+    }
+
+    // Full profile fetched per candidate — the achievement holder object carries no campus
+    // info, so it's the only way to check "home campus not in France".
+    const remaining = candidates.slice(offset);
+    let consumed = 0;
+    for (let i = 0; i < remaining.length && holders.length < WORLDWIDE_BATCH_LIMIT; i += PROFILE_BATCH_SIZE) {
+      const batch = remaining.slice(i, i + PROFILE_BATCH_SIZE);
+      const profiles = await Promise.all(
+        batch.map((login) => fetchUserRaw(login).then((data) => normalizeFullProfile(data, [])).catch(() => null)),
+      );
+
+      for (const profile of profiles) {
+        consumed += 1;
+        if (!profile || profile.country === 'France') { continue; }
+        holders.push({
+          id: profile.id,
+          login: profile.login,
+          displayName: profile.displayName,
+          imageUrl: profile.imageUrl,
+          campuses: profile.campuses,
+          country: profile.country,
+        });
+        if (holders.length >= WORLDWIDE_BATCH_LIMIT) { break; }
+      }
+    }
+
+    const newOffset = offset + consumed;
+    if (holders.length >= WORLDWIDE_BATCH_LIMIT && newOffset < candidates.length) {
+      return { holders, nextCursor: { page: pageNum, offset: newOffset } };
+    }
+    if (page.length < 100) { return { holders, nextCursor: null }; }
+
+    pageNum += 1;
+    offset = 0;
+  }
+
+  return { holders, nextCursor: holders.length >= WORLDWIDE_BATCH_LIMIT ? { page: pageNum, offset } : null };
+};
+
 // --- Visitor OAuth (authorization_code grant) -------------------------------------------
 // The app's FT_CLIENT_ID/FT_CLIENT_SECRET identify the same registered 42 API application
 // as before, but every data-fetching request below runs using the VISITOR's own access
 // token (obtained here), not an app-level client_credentials token — each visitor's calls
 // are made as themselves against 42's API.
-const getRedirectUri = (req) => `${req.protocol}://${req.get('host')}/api/auth/callback`;
+// In local dev, Vite's proxy rewrites the Host header to the proxy target (localhost:4000)
+// before Express ever sees the request, so req.get('host') can't be trusted to reflect the
+// browser's real origin (localhost:5173) — APP_ORIGIN overrides it when set. Not needed in
+// production (Vercel has no such proxy in front of the function).
+const getRedirectUri = (req) =>
+  `${process.env.APP_ORIGIN || `${req.protocol}://${req.get('host')}`}/api/auth/callback`;
 
 const exchangeCodeForToken = async (code, redirectUri) => {
   const body = new URLSearchParams({
@@ -474,6 +564,26 @@ app.get('/api/students/:login/profile', requireAuth, async (req, res) => {
     res.json({ profile: await fetchFullProfile(login) });
   } catch (err) {
     if (err.status === 404) { return res.status(404).json({ error: 'NOT_FOUND' }); }
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+app.get('/api/achievements/worldwide-holders', requireAuth, async (req, res) => {
+  const name = String(req.query.name || '').trim();
+  if (!name) { return res.status(400).json({ error: 'EMPTY_NAME' }); }
+  const cursor = {
+    page: Number(req.query.page) || 1,
+    offset: Number(req.query.offset) || 0,
+  };
+
+  try {
+    const achievement = await findAchievementByName(name);
+    if (!achievement) { return res.status(404).json({ error: 'ACHIEVEMENT_NOT_FOUND' }); }
+
+    const thisYearLogins = await getThisYearLoginsCached(achievement.id);
+    const { holders, nextCursor } = await fetchWorldwideNonFranceHoldersPage(achievement.id, thisYearLogins, cursor);
+    res.json({ achievement, holders, nextCursor });
+  } catch (err) {
     res.status(err.status || 500).json({ error: err.message });
   }
 });

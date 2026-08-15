@@ -23,6 +23,12 @@ export const fetchAchievementHolders = (name, campusId = null) =>
 export const fetchAchievedDate = (login, name) =>
   request(`/api/achievements/achieved-date?login=${encodeURIComponent(login)}&name=${encodeURIComponent(name)}`);
 
+export const fetchWorldwideAchievementHolders = (name, cursor = { page: 1, offset: 0 }) =>
+  request(
+    `/api/achievements/worldwide-holders?name=${encodeURIComponent(name)}` +
+      `&page=${cursor.page}&offset=${cursor.offset}`,
+  );
+
 // Auth — visitors log in with their own 42 account (authorization_code flow); every data
 // route above requires this session and uses the visitor's own access token server-side.
 export const LOGIN_URL = '/api/auth/login';

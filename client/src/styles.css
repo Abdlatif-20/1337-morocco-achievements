@@ -74,6 +74,30 @@ body {
   margin-bottom: 16px;
 }
 
+.tabs-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.tab-btn {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-secondary);
+  font-size: 14px;
+  font-weight: 500;
+  padding: 8px 4px;
+  cursor: pointer;
+}
+
+.tab-btn-active {
+  color: var(--primary);
+  border-bottom-color: var(--primary);
+  font-weight: 600;
+}
+
 .filters-row {
   display: flex;
   align-items: center;

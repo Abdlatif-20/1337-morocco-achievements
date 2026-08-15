@@ -6,6 +6,7 @@ import {
   fetchCampuses,
   fetchMe,
   fetchStudentProfile,
+  fetchWorldwideAchievementHolders,
   logout,
 } from './api.js';
 import StudentCard from './components/StudentCard.jsx';
@@ -87,10 +88,52 @@ const App = () => {
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState(null);
 
+  // 'achievement' = the existing Moroccan achievement-holders view; 'worldwide' = students
+  // who unlocked the same achievement this year, home campus outside France. Fetched 20 at
+  // a time — worldwideCursor is the opaque {page, offset} to resume from on "Load more".
+  const [activeTab, setActiveTab] = useState('achievement');
+  const [worldwideAchievement, setWorldwideAchievement] = useState(null);
+  const [worldwideHolders, setWorldwideHolders] = useState([]);
+  const [worldwideCursor, setWorldwideCursor] = useState({ page: 1, offset: 0 });
+  const [worldwideHasMore, setWorldwideHasMore] = useState(true);
+  const [worldwideLoading, setWorldwideLoading] = useState(false);
+  const [worldwideError, setWorldwideError] = useState(null);
+  const [worldwideLoaded, setWorldwideLoaded] = useState(false);
+
   useEffect(() => {
     if (!me) { return; }
     fetchCampuses().then(setCampuses).catch(() => {});
   }, [me]);
+
+  const loadWorldwideHolders = ({ force = false, more = false } = {}) => {
+    if (!force && !more && worldwideLoaded) { return; }
+    const cursor = more ? worldwideCursor : { page: 1, offset: 0 };
+
+    setWorldwideLoading(true);
+    setWorldwideError(null);
+    fetchWorldwideAchievementHolders(DEFAULT_ACHIEVEMENT, cursor)
+      .then((res) => {
+        setWorldwideAchievement(res.achievement);
+        setWorldwideHolders((prev) => (more ? [...prev, ...res.holders] : res.holders));
+        setWorldwideCursor(res.nextCursor || cursor);
+        setWorldwideHasMore(Boolean(res.nextCursor));
+        setWorldwideLoaded(true);
+      })
+      .catch((err) => {
+        if (err.status === 401) { setMe(null); return; }
+        if (err.message === 'ACHIEVEMENT_NOT_FOUND') {
+          setWorldwideError(`No achievement named "${DEFAULT_ACHIEVEMENT}" found.`);
+        } else {
+          setWorldwideError(err.message);
+        }
+      })
+      .finally(() => setWorldwideLoading(false));
+  };
+
+  useEffect(() => {
+    if (!me || activeTab !== 'worldwide') { return; }
+    loadWorldwideHolders();
+  }, [me, activeTab]);
 
   const loadHolders = (campusId, { force = false } = {}) => {
     const key = campusId || '';
@@ -186,6 +229,25 @@ const App = () => {
         </div>
       </header>
 
+      <div className="tabs-row">
+        <button
+          type="button"
+          className={`tab-btn${activeTab === 'achievement' ? ' tab-btn-active' : ''}`}
+          onClick={() => setActiveTab('achievement')}
+        >
+          Morocco → Paris
+        </button>
+        <button
+          type="button"
+          className={`tab-btn${activeTab === 'worldwide' ? ' tab-btn-active' : ''}`}
+          onClick={() => setActiveTab('worldwide')}
+        >
+          Worldwide → Paris
+        </button>
+      </div>
+
+      {activeTab === 'achievement' && (
+      <>
       <div className="filters-row">
         <label className="filter-select">
           Campus
@@ -253,6 +315,57 @@ const App = () => {
             )}
           </>
         )
+      )}
+      </>
+      )}
+
+      {activeTab === 'worldwide' && (
+        <>
+          <div className="filters-row">
+            <p className="status-text">Students worldwide who earned this achievement this year (home campus outside France)</p>
+            <button
+              type="button"
+              className="refresh-btn"
+              onClick={() => loadWorldwideHolders({ force: true })}
+              disabled={worldwideLoading}
+            >
+              {worldwideLoading ? 'Loading…' : 'Refresh'}
+            </button>
+          </div>
+
+          {worldwideError && <p className="error-text">{worldwideError}</p>}
+
+          {worldwideLoading && worldwideHolders.length === 0 ? (
+            <p className="status-text">Looking up the achievement and its worldwide holders…</p>
+          ) : (
+            worldwideAchievement && (
+              <>
+                <p className="status-text">
+                  "{worldwideAchievement.name}" — {worldwideHolders.length} student(s) loaded
+                </p>
+                {worldwideHolders.length === 0 ? (
+                  <p className="status-text">No non-France students hold this achievement this year yet.</p>
+                ) : (
+                  <div className="student-grid">
+                    {worldwideHolders.map((h) => (
+                      <StudentCard key={h.id} student={h} onOpen={() => openHolderDetail(h)} />
+                    ))}
+                  </div>
+                )}
+                {worldwideHasMore && (
+                  <button
+                    type="button"
+                    className="refresh-btn"
+                    onClick={() => loadWorldwideHolders({ more: true })}
+                    disabled={worldwideLoading}
+                  >
+                    {worldwideLoading ? 'Loading…' : 'Load 20 more'}
+                  </button>
+                )}
+              </>
+            )
+          )}
+        </>
       )}
 
       {detailError && <p className="error-text">{detailError}</p>}
