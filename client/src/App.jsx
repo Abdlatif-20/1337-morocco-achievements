@@ -214,11 +214,6 @@ const App = () => {
       ) : (
         achievementResult && (
           <>
-            <p className="status-text">
-              "{achievementResult.achievement.name}"
-              {achievementResult.achievement.description ? `: ${achievementResult.achievement.description}` : ''}
-            </p>
-
             {achievementResult.groups ? (
               // "All Morocco": one section per campus, holders never mixed together.
               achievementResult.groups.map((g) => (
