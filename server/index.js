@@ -376,7 +376,8 @@ app.get('/api/auth/callback', async (req, res) => {
 
     setSessionCookie(res, { accessToken, refreshToken, expiresAt, user });
     res.redirect('/');
-  } catch {
+  } catch (err) {
+    console.error('OAuth callback failed:', err);
     res.redirect('/?authError=login_failed');
   }
 });
