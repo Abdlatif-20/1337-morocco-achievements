@@ -365,7 +365,10 @@ app.get('/api/auth/callback', async (req, res) => {
     const meResponse = await fetch(`${API_BASE}/me`, {
       headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' },
     });
-    if (!meResponse.ok) { throw new Error('ME_FETCH_FAILED'); }
+    if (!meResponse.ok) {
+      const body = await meResponse.text().catch(() => '');
+      throw new Error(`ME_FETCH_FAILED:${meResponse.status}:${body.slice(0, 300)}`);
+    }
     const me = await meResponse.json();
     const user = {
       id: me.id,
