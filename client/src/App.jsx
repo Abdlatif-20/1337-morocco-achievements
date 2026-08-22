@@ -167,7 +167,7 @@ const App = () => {
     setParisError((prev) => ({ ...prev, [campusId]: null }));
     fetchAllCampusParisAdders(campusId, (soFar) => {
       setParisCache((prev) => ({ ...prev, [campusId]: { adders: soFar, ready: false } }));
-    })
+    }, { refresh: force })
       .then((all) => {
         setParisCache((prev) => ({ ...prev, [campusId]: { adders: all, ready: true } }));
       })

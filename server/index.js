@@ -272,10 +272,16 @@ const fetchAchievedAt = async (userId, achievementId) => {
 // itself, instead of forcing a ~10-minute one-profile-at-a-time scan under a visitor's
 // token, is a reasonable trade. Every other route is untouched and still visitor-scoped.
 //
-// Result is cached in memory per campus, refreshed on server start and every REFRESH_MS —
-// requests just read whatever's cached, so this is what actually makes the list load in
-// seconds instead of minutes.
+// Cached per campus with a TTL (same pattern as achievementHoldersCache below) — NOT a
+// fire-and-forget background job. An earlier version kicked the scan off detached and had
+// the route return immediately, relying on the client to poll until it finished; that works
+// on a persistent Node process (local dev) but silently never completes on Vercel, because a
+// serverless function can be frozen right after it sends its response, killing any detached
+// work that hasn't finished — verified live in prod (the route kept responding "still
+// scanning" forever). Awaiting the scan directly, inside the request that needs it, is what
+// actually guarantees it runs to completion, on both platforms.
 const PARIS_CAMPUS_ID = 1;
+const NO_ACHIEVEMENT_CAMPUS_IDS = [55, 75]; // Tétouan, Rabat — mirrors the client-side constant
 const CAMPUS_NAME_LOOKUP = {
   [PARIS_CAMPUS_ID]: { id: PARIS_CAMPUS_ID, name: 'Paris', country: 'France' },
   ...Object.fromEntries(MOROCCAN_CAMPUSES.map((c) => [c.id, { id: c.id, name: c.name, country: 'Morocco' }])),
@@ -303,68 +309,55 @@ const getAppToken = async () => {
   return appTokenCache.token;
 };
 
-const parisAddersCache = new Map(); // campusId -> { status: 'pending'|'ready'|'error', adders, error }
+const computeParisAdders = async (campusId) => {
+  const token = await getAppToken();
+  const roster = await fetchAllPages(`/campus/${campusId}/users`, { maxPages: 20, tokenOverride: token });
+  const candidates = roster.filter((u) => !u['staff?']);
+  const byId = new Map(candidates.map((u) => [u.id, u]));
+  const adders = [];
 
-const runParisAddersScan = async (campusId, entry) => {
-  try {
-    const token = await getAppToken();
-    const roster = await fetchAllPages(`/campus/${campusId}/users`, { maxPages: 20, tokenOverride: token });
-    const candidates = roster.filter((u) => !u['staff?']);
-    const byId = new Map(candidates.map((u) => [u.id, u]));
+  for (let i = 0; i < candidates.length; i += 100) {
+    const chunk = candidates.slice(i, i + 100);
+    const rows = await fetchAllPages(
+      `/campus_users?filter[user_id]=${chunk.map((u) => u.id).join(',')}`,
+      { maxPages: 3, tokenOverride: token },
+    );
+    for (const row of rows) {
+      if (row.campus_id !== PARIS_CAMPUS_ID) { continue; }
+      const u = byId.get(row.user_id);
+      if (!u) { continue; }
 
-    for (let i = 0; i < candidates.length; i += 100) {
-      const chunk = candidates.slice(i, i + 100);
-      const rows = await fetchAllPages(
-        `/campus_users?filter[user_id]=${chunk.map((u) => u.id).join(',')}`,
-        { maxPages: 3, tokenOverride: token },
-      );
-      for (const row of rows) {
-        if (row.campus_id !== PARIS_CAMPUS_ID) { continue; }
-        const u = byId.get(row.user_id);
-        if (!u) { continue; }
-
-        entry.adders.push({
-          id: u.id,
-          login: u.login,
-          displayName: u.usual_full_name || u.displayname || u.login,
-          imageUrl: u.image?.link || u.image?.versions?.medium || null,
-          campuses: [CAMPUS_NAME_LOOKUP[campusId], CAMPUS_NAME_LOOKUP[PARIS_CAMPUS_ID]],
-        });
-      }
+      adders.push({
+        id: u.id,
+        login: u.login,
+        displayName: u.usual_full_name || u.displayname || u.login,
+        imageUrl: u.image?.link || u.image?.versions?.medium || null,
+        campuses: [CAMPUS_NAME_LOOKUP[campusId], CAMPUS_NAME_LOOKUP[PARIS_CAMPUS_ID]],
+      });
     }
-    entry.status = 'ready';
-  } catch (err) {
-    entry.status = 'error';
-    entry.error = err.message;
   }
+  return adders;
 };
 
-const PARIS_ADDERS_REFRESH_MS = 60 * 60 * 1000; // hourly — this data changes rarely
+const PARIS_ADDERS_CACHE_TTL_MS = 60 * 60 * 1000; // hourly — this data changes rarely
+const parisAddersCache = new Map(); // campusId -> { adders, cachedAt }
 
-const refreshParisAdders = (campusId) => {
-  const entry = { status: 'pending', adders: [], error: null };
-  parisAddersCache.set(campusId, entry);
-  runParisAddersScan(campusId, entry);
+const getParisAdders = async (campusId, { bypassCache = false } = {}) => {
+  const cached = parisAddersCache.get(campusId);
+  if (!bypassCache && cached && Date.now() - cached.cachedAt < PARIS_ADDERS_CACHE_TTL_MS) {
+    return cached.adders;
+  }
+  const adders = await computeParisAdders(campusId);
+  parisAddersCache.set(campusId, { adders, cachedAt: Date.now() });
+  return adders;
 };
 
-// Kicks off the scan on first access (if not already running/done) and always returns
-// immediately — callers check `status` to know whether `adders` is the final list yet.
-const getParisAddersEntry = (campusId) => {
-  if (!parisAddersCache.has(campusId)) { refreshParisAdders(campusId); }
-  return parisAddersCache.get(campusId);
-};
-
-// Prewarmed at boot (no visitor needed, since this scan runs as the app itself — see
-// above) and kept fresh on a timer, so a real visitor essentially never hits a cold cache.
-// Only in local dev: a Vercel function instance isn't a long-lived process, so a boot-time
-// scan + setInterval there would just repeat pointlessly across cold starts — the lazy
-// per-request trigger in getParisAddersEntry already covers that environment correctly.
-const NO_ACHIEVEMENT_CAMPUS_IDS = [55, 75]; // Tétouan, Rabat — mirrors the client-side constant
-
+// Prewarmed at boot in local dev only — a Vercel function instance isn't a long-lived
+// process, so there's no "boot" to hook; there the first real request to hit a cold cache
+// just pays the scan cost itself (well within the 300s function timeout).
 if (process.env.VERCEL !== '1') {
   for (const campusId of NO_ACHIEVEMENT_CAMPUS_IDS) {
-    refreshParisAdders(campusId);
-    setInterval(() => refreshParisAdders(campusId), PARIS_ADDERS_REFRESH_MS);
+    getParisAdders(campusId).catch(() => {});
   }
 }
 
@@ -643,17 +636,18 @@ app.get('/api/achievements/holders', requireAuth, async (req, res) => {
   }
 });
 
-app.get('/api/campuses/:campusId/paris-adders', requireAuth, (req, res) => {
+app.get('/api/campuses/:campusId/paris-adders', requireAuth, async (req, res) => {
   const campusId = Number(req.params.campusId);
   if (!MOROCCAN_CAMPUSES.some((c) => c.id === campusId)) {
     return res.status(400).json({ error: 'INVALID_CAMPUS' });
   }
 
-  const entry = getParisAddersEntry(campusId);
-  if (entry.status === 'error') {
-    return res.status(500).json({ error: entry.error });
+  try {
+    const adders = await getParisAdders(campusId, { bypassCache: req.query.refresh === '1' });
+    res.json({ adders, ready: true });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
   }
-  res.json({ adders: entry.adders, ready: entry.status === 'ready' });
 });
 
 app.get('/api/students/:login/profile', requireAuth, async (req, res) => {

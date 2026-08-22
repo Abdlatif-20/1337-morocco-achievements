@@ -26,21 +26,16 @@ export const fetchAchievedDate = (login, name) =>
 
 // Tétouan/Rabat have no holders of the croissant achievement, so this is the substitute
 // "visited Paris" signal for those two campuses: students who have Paris on their profile.
-// The server scans and caches the full result per campus (first request triggers it,
-// subsequent ones are instant) — this just reads the current cache state: `ready: true`
-// once the scan behind it has finished, `adders` populated so far either way.
-export const fetchCampusParisAdders = (campusId) =>
-  request(`/api/campuses/${campusId}/paris-adders`);
+// The server awaits the scan directly and caches the result per campus (first request pays
+// the scan cost — can take up to a minute — every request after that within the cache
+// window is instant), so this single call either returns fast or takes a while; there's
+// nothing to poll for.
+export const fetchCampusParisAdders = (campusId, { refresh = false } = {}) =>
+  request(`/api/campuses/${campusId}/paris-adders${refresh ? '?refresh=1' : ''}`);
 
-// Polls fetchCampusParisAdders until the server reports the scan is done, calling onProgress
-// after every poll so a still-warming cache doesn't just look like a frozen spinner.
-export const fetchAllCampusParisAdders = async (campusId, onProgress) => {
-  for (;;) {
-    const res = await fetchCampusParisAdders(campusId);
-    onProgress?.(res.adders, !res.ready);
-    if (res.ready) { return res.adders; }
-    await new Promise((r) => setTimeout(r, 5000));
-  }
+export const fetchAllCampusParisAdders = (campusId, onProgress, { refresh = false } = {}) => {
+  onProgress?.([], true);
+  return fetchCampusParisAdders(campusId, { refresh }).then((res) => res.adders);
 };
 
 // Auth — visitors log in with their own 42 account (authorization_code flow); every data
