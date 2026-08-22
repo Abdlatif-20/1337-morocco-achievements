@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   LOGIN_URL,
   fetchAchievedDate,
   fetchAchievementHolders,
+  fetchAllCampusParisAdders,
   fetchCampuses,
   fetchMe,
   fetchStudentProfile,
@@ -12,6 +13,10 @@ import StudentCard from './components/StudentCard.jsx';
 import StudentDetailModal from './components/StudentDetailModal.jsx';
 
 const DEFAULT_ACHIEVEMENT = 'Je voudrais un croissant';
+
+// Tétouan (55) and Rabat (75) have never had a holder of this achievement — searching for it
+// there is a guaranteed-empty API call. Skip straight to the Paris-on-profile check instead.
+const NO_ACHIEVEMENT_CAMPUS_IDS = [55, 75];
 
 const AUTH_ERROR_MESSAGES = {
   invalid_state: 'Login could not be verified — please try again.',
@@ -48,6 +53,51 @@ const AccountMenu = ({ user, onLogout }) => {
         </div>
       )}
     </div>
+  );
+};
+
+// Fallback shown for a campus with zero achievement holders (Tétouan/Rabat, always empty so
+// far): students there who have 42 Paris on their profile. The server caches this per campus
+// (see server/index.js) and refreshes it automatically — the point of this component is to
+// respect that: a cached result renders immediately with no network call at all, and only
+// "Refresh" (or a first-ever visit) actually asks the server, which itself just serves its
+// cache unless that cache is still warming.
+const ParisAddersSection = ({ campusId, cached, loading, error, onLoad, onOpenStudent }) => {
+  useEffect(() => {
+    onLoad(campusId);
+  }, [campusId]);
+
+  if (error) {
+    return <p className="error-text">{error}</p>;
+  }
+  const adders = cached?.adders || [];
+  if (loading && adders.length === 0) {
+    return (
+      <p className="status-text">
+        No achievement holders here — checking who has 42 Paris on their profile
+        {cached && !cached.ready ? ` (${adders.length} found so far, this can take a while the first time)` : ''}…
+      </p>
+    );
+  }
+  if (adders.length === 0) {
+    return <p className="status-text">No students hold this achievement here, and none have 42 Paris on their profile.</p>;
+  }
+  // Dedupe (the scan can't produce duplicates, but cheap to guard) and sort alphabetically
+  // so the list reads consistently instead of raw campus-roster order.
+  const sortedAdders = [...new Map(adders.map((a) => [a.id, a])).values()]
+    .sort((a, b) => a.displayName.localeCompare(b.displayName));
+  return (
+    <>
+      <p className="status-text">
+        No achievement holders here, but {sortedAdders.length} student(s) have 42 Paris on their profile
+        {cached && !cached.ready ? ' (still checking for more)' : ''}:
+      </p>
+      <div className="student-grid">
+        {sortedAdders.map((a) => (
+          <StudentCard key={a.id} student={a} onOpen={() => onOpenStudent(a)} />
+        ))}
+      </div>
+    </>
   );
 };
 
@@ -89,34 +139,95 @@ const App = () => {
 
   useEffect(() => {
     if (!me) { return; }
-    fetchCampuses().then(setCampuses).catch(() => {});
+    fetchCampuses().then((list) => {
+      setCampuses(list);
+      // Default the dropdown to the visitor's own campus instead of "All Morocco" — only
+      // when nothing's been picked yet, so this never clobbers a manual selection.
+      if (me.primaryCampusId && list.some((c) => c.id === me.primaryCampusId)) {
+        setSelectedCampusId((prev) => (prev === '' ? String(me.primaryCampusId) : prev));
+      }
+    }).catch(() => {});
   }, [me]);
+
+  // Paris-adders cache, kept in App (not the section component) so switching the campus
+  // dropdown back and forth reuses what's already been fetched instead of re-scanning.
+  // { [campusId]: { adders, ready } } — `ready: false` means still checking, `adders` is
+  // whatever's been found so far.
+  const [parisCache, setParisCache] = useState({});
+  const [parisLoading, setParisLoading] = useState({});
+  const [parisError, setParisError] = useState({});
+
+  const loadParisAdders = (campusId, { force = false } = {}) => {
+    // Already have a finished result and nothing asked for a refresh — don't call the API
+    // at all, just keep showing what's cached.
+    if (!force && parisCache[campusId]?.ready) { return; }
+    if (parisLoading[campusId]) { return; }
+
+    setParisLoading((prev) => ({ ...prev, [campusId]: true }));
+    setParisError((prev) => ({ ...prev, [campusId]: null }));
+    fetchAllCampusParisAdders(campusId, (soFar) => {
+      setParisCache((prev) => ({ ...prev, [campusId]: { adders: soFar, ready: false } }));
+    })
+      .then((all) => {
+        setParisCache((prev) => ({ ...prev, [campusId]: { adders: all, ready: true } }));
+      })
+      .catch((err) => {
+        if (err.status === 401) { setMe(null); return; }
+        setParisError((prev) => ({ ...prev, [campusId]: err.message }));
+      })
+      .finally(() => {
+        setParisLoading((prev) => ({ ...prev, [campusId]: false }));
+      });
+  };
+
+  // Guards against out-of-order responses: switching from "All Morocco" to a specific campus
+  // fires two requests in quick succession (mount defaults to '', then the visitor's own
+  // campus effect fires right after) — the slower "All Morocco" one can resolve AFTER the
+  // faster single-campus one and clobber it with the wrong (all-campuses) result. Only the
+  // response matching the most recently *started* request is ever applied.
+  const latestHoldersKeyRef = useRef(null);
 
   const loadHolders = (campusId, { force = false } = {}) => {
     const key = campusId || '';
+    latestHoldersKeyRef.current = key;
+
     if (!force && cache[key]) {
       setAchievementResult(cache[key]);
       setAchievementError(null);
       return;
     }
 
+    if (campusId && NO_ACHIEVEMENT_CAMPUS_IDS.includes(Number(campusId))) {
+      const empty = { achievement: null, holders: [] };
+      setAchievementResult(empty);
+      setCache((prev) => ({ ...prev, [key]: empty }));
+      setAchievementError(null);
+      setAchievementLoading(false);
+      return;
+    }
+
     setAchievementLoading(true);
     setAchievementError(null);
     setAchievementResult(null);
-    fetchAchievementHolders(DEFAULT_ACHIEVEMENT, campusId || null)
+    fetchAchievementHolders(DEFAULT_ACHIEVEMENT, campusId || null, { refresh: force })
       .then((res) => {
-        setAchievementResult(res);
         setCache((prev) => ({ ...prev, [key]: res }));
+        if (latestHoldersKeyRef.current !== key) { return; }
+        setAchievementResult(res);
       })
       .catch((err) => {
         if (err.status === 401) { setMe(null); return; }
+        if (latestHoldersKeyRef.current !== key) { return; }
         if (err.message === 'ACHIEVEMENT_NOT_FOUND') {
           setAchievementError(`No achievement named "${DEFAULT_ACHIEVEMENT}" found.`);
         } else {
           setAchievementError(err.message);
         }
       })
-      .finally(() => setAchievementLoading(false));
+      .finally(() => {
+        if (latestHoldersKeyRef.current !== key) { return; }
+        setAchievementLoading(false);
+      });
   };
 
   useEffect(() => {
@@ -200,7 +311,14 @@ const App = () => {
         <button
           type="button"
           className="refresh-btn"
-          onClick={() => loadHolders(selectedCampusId, { force: true })}
+          onClick={() => {
+            loadHolders(selectedCampusId, { force: true });
+            if (selectedCampusId && NO_ACHIEVEMENT_CAMPUS_IDS.includes(Number(selectedCampusId))) {
+              loadParisAdders(Number(selectedCampusId), { force: true });
+            } else if (!selectedCampusId) {
+              NO_ACHIEVEMENT_CAMPUS_IDS.forEach((id) => loadParisAdders(id, { force: true }));
+            }
+          }}
           disabled={achievementLoading}
         >
           {achievementLoading ? 'Loading…' : 'Refresh'}
@@ -218,9 +336,18 @@ const App = () => {
               // "All Morocco": one section per campus, holders never mixed together.
               achievementResult.groups.map((g) => (
                 <div key={g.campus.id} className="campus-group">
-                  <h2 className="section-heading">{g.campus.name} ({g.holders.length})</h2>
+                  <h2 className="section-heading">
+                    {g.campus.name} ({g.holders.length > 0 ? g.holders.length : (parisCache[g.campus.id]?.adders.length ?? 0)})
+                  </h2>
                   {g.holders.length === 0 ? (
-                    <p className="status-text">No students hold this achievement here yet.</p>
+                    <ParisAddersSection
+                      campusId={g.campus.id}
+                      cached={parisCache[g.campus.id]}
+                      loading={Boolean(parisLoading[g.campus.id])}
+                      error={parisError[g.campus.id]}
+                      onLoad={loadParisAdders}
+                      onOpenStudent={openHolderDetail}
+                    />
                   ) : (
                     <div className="student-grid">
                       {g.holders.map((h) => (
@@ -230,6 +357,15 @@ const App = () => {
                   )}
                 </div>
               ))
+            ) : achievementResult.holders.length === 0 ? (
+              <ParisAddersSection
+                campusId={Number(selectedCampusId)}
+                cached={parisCache[Number(selectedCampusId)]}
+                loading={Boolean(parisLoading[Number(selectedCampusId)])}
+                error={parisError[Number(selectedCampusId)]}
+                onLoad={loadParisAdders}
+                onOpenStudent={openHolderDetail}
+              />
             ) : (
               <>
                 <p className="status-text">
@@ -241,9 +377,6 @@ const App = () => {
                     <StudentCard key={h.id} student={h} onOpen={() => openHolderDetail(h)} />
                   ))}
                 </div>
-                {achievementResult.holders.length === 0 && (
-                  <p className="status-text">No students hold this achievement here yet.</p>
-                )}
               </>
             )}
           </>

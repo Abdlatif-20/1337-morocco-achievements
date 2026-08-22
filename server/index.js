@@ -42,9 +42,9 @@ const throttle = () => {
 // data be fetched using each visitor's own 42 account, not the app owner's.
 const requestContext = new AsyncLocalStorage();
 
-const apiGetOnce = async (path) => {
+const apiGetOnce = async (path, tokenOverride) => {
   await throttle();
-  const token = requestContext.getStore()?.token;
+  const token = tokenOverride || requestContext.getStore()?.token;
   if (!token) { const err = new Error('NO_REQUEST_TOKEN'); err.status = 401; throw err; }
 
   const response = await fetch(`${API_BASE}${path}`, {
@@ -90,9 +90,9 @@ const apiGetOnce = async (path) => {
 // are never retried at all.
 const MAX_AUTO_RETRY_WAIT_SECONDS = 10;
 
-const apiGet = async (path) => {
+const apiGet = async (path, tokenOverride) => {
   try {
-    return await apiGetOnce(path);
+    return await apiGetOnce(path, tokenOverride);
   } catch (err) {
     const isTransient = !err.status || err.status === 429 || err.status >= 500;
     if (!isTransient) { throw err; }
@@ -101,7 +101,7 @@ const apiGet = async (path) => {
       throw err;
     }
     await new Promise((r) => setTimeout(r, (err.retryAfterSeconds ?? (err.status === 429 ? 3 : 1.5)) * 1000));
-    return apiGetOnce(path);
+    return apiGetOnce(path, tokenOverride);
   }
 };
 
@@ -176,11 +176,11 @@ const fetchFullProfile = async (login) => {
   return normalizeFullProfile(user, coalitions);
 };
 
-const fetchAllPages = async (path, { maxPages = 6, pageSize = 100 } = {}) => {
+const fetchAllPages = async (path, { maxPages = 6, pageSize = 100, tokenOverride } = {}) => {
   const results = [];
   for (let pageNum = 1; pageNum <= maxPages; pageNum += 1) {
     const sep = path.includes('?') ? '&' : '?';
-    const { data } = await apiGet(`${path}${sep}page[size]=${pageSize}&page[number]=${pageNum}`);
+    const { data } = await apiGet(`${path}${sep}page[size]=${pageSize}&page[number]=${pageNum}`, tokenOverride);
     if (!Array.isArray(data) || data.length === 0) { break; }
     results.push(...data);
     if (data.length < pageSize) { break; }
@@ -257,12 +257,128 @@ const fetchAchievedAt = async (userId, achievementId) => {
   return Array.isArray(data) && data[0]?.created_at ? data[0].created_at : null;
 };
 
+// --- Tétouan/Rabat: students who have Paris on their profile ---------------------------
+// Neither Tétouan nor Rabat has ever had a holder of "Je voudrais un croissant" (verified
+// live — both always come back empty), so for those two campuses the achievement itself
+// can't be used as a "visited Paris" signal.
+//
+// This is the one deliberate exception to "every 42 API call runs as the visitor" (see
+// CLAUDE.md): GET /v2/campus_users?filter[user_id]=a,b,c batches this check for ~100
+// students in a single call, but 403s under an ordinary visitor's `scope: public` token —
+// verified live it works fine under this app's own client_credentials token, which has
+// broader access. The data behind it (campus rosters, which campuses a student belongs to)
+// isn't visitor-specific or sensitive — it's the same public directory info every visitor
+// can already see elsewhere in this app — so running this one aggregate lookup as the app
+// itself, instead of forcing a ~10-minute one-profile-at-a-time scan under a visitor's
+// token, is a reasonable trade. Every other route is untouched and still visitor-scoped.
+//
+// Result is cached in memory per campus, refreshed on server start and every REFRESH_MS —
+// requests just read whatever's cached, so this is what actually makes the list load in
+// seconds instead of minutes.
+const PARIS_CAMPUS_ID = 1;
+const CAMPUS_NAME_LOOKUP = {
+  [PARIS_CAMPUS_ID]: { id: PARIS_CAMPUS_ID, name: 'Paris', country: 'France' },
+  ...Object.fromEntries(MOROCCAN_CAMPUSES.map((c) => [c.id, { id: c.id, name: c.name, country: 'Morocco' }])),
+};
+
+let appTokenCache = null; // { token, expiresAt }
+
+const getAppToken = async () => {
+  if (appTokenCache && Date.now() < appTokenCache.expiresAt - 60_000) {
+    return appTokenCache.token;
+  }
+  const body = new URLSearchParams({
+    grant_type: 'client_credentials',
+    client_id: process.env.FT_CLIENT_ID,
+    client_secret: process.env.FT_CLIENT_SECRET,
+  });
+  const response = await fetch(TOKEN_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body,
+  });
+  if (!response.ok) { throw new Error('APP_TOKEN_FAILED'); }
+  const data = await response.json();
+  appTokenCache = { token: data.access_token, expiresAt: Date.now() + (data.expires_in || 3600) * 1000 };
+  return appTokenCache.token;
+};
+
+const parisAddersCache = new Map(); // campusId -> { status: 'pending'|'ready'|'error', adders, error }
+
+const runParisAddersScan = async (campusId, entry) => {
+  try {
+    const token = await getAppToken();
+    const roster = await fetchAllPages(`/campus/${campusId}/users`, { maxPages: 20, tokenOverride: token });
+    const candidates = roster.filter((u) => !u['staff?']);
+    const byId = new Map(candidates.map((u) => [u.id, u]));
+
+    for (let i = 0; i < candidates.length; i += 100) {
+      const chunk = candidates.slice(i, i + 100);
+      const rows = await fetchAllPages(
+        `/campus_users?filter[user_id]=${chunk.map((u) => u.id).join(',')}`,
+        { maxPages: 3, tokenOverride: token },
+      );
+      for (const row of rows) {
+        if (row.campus_id !== PARIS_CAMPUS_ID) { continue; }
+        const u = byId.get(row.user_id);
+        if (!u) { continue; }
+
+        entry.adders.push({
+          id: u.id,
+          login: u.login,
+          displayName: u.usual_full_name || u.displayname || u.login,
+          imageUrl: u.image?.link || u.image?.versions?.medium || null,
+          campuses: [CAMPUS_NAME_LOOKUP[campusId], CAMPUS_NAME_LOOKUP[PARIS_CAMPUS_ID]],
+        });
+      }
+    }
+    entry.status = 'ready';
+  } catch (err) {
+    entry.status = 'error';
+    entry.error = err.message;
+  }
+};
+
+const PARIS_ADDERS_REFRESH_MS = 60 * 60 * 1000; // hourly — this data changes rarely
+
+const refreshParisAdders = (campusId) => {
+  const entry = { status: 'pending', adders: [], error: null };
+  parisAddersCache.set(campusId, entry);
+  runParisAddersScan(campusId, entry);
+};
+
+// Kicks off the scan on first access (if not already running/done) and always returns
+// immediately — callers check `status` to know whether `adders` is the final list yet.
+const getParisAddersEntry = (campusId) => {
+  if (!parisAddersCache.has(campusId)) { refreshParisAdders(campusId); }
+  return parisAddersCache.get(campusId);
+};
+
+// Prewarmed at boot (no visitor needed, since this scan runs as the app itself — see
+// above) and kept fresh on a timer, so a real visitor essentially never hits a cold cache.
+// Only in local dev: a Vercel function instance isn't a long-lived process, so a boot-time
+// scan + setInterval there would just repeat pointlessly across cold starts — the lazy
+// per-request trigger in getParisAddersEntry already covers that environment correctly.
+const NO_ACHIEVEMENT_CAMPUS_IDS = [55, 75]; // Tétouan, Rabat — mirrors the client-side constant
+
+if (process.env.VERCEL !== '1') {
+  for (const campusId of NO_ACHIEVEMENT_CAMPUS_IDS) {
+    refreshParisAdders(campusId);
+    setInterval(() => refreshParisAdders(campusId), PARIS_ADDERS_REFRESH_MS);
+  }
+}
+
 // --- Visitor OAuth (authorization_code grant) -------------------------------------------
 // The app's FT_CLIENT_ID/FT_CLIENT_SECRET identify the same registered 42 API application
 // as before, but every data-fetching request below runs using the VISITOR's own access
 // token (obtained here), not an app-level client_credentials token — each visitor's calls
 // are made as themselves against 42's API.
-const getRedirectUri = (req) => `${req.protocol}://${req.get('host')}/api/auth/callback`;
+// In local dev, Vite's proxy rewrites the Host header to the proxy target (localhost:4000)
+// before Express ever sees the request, so req.get('host') can't be trusted to reflect the
+// browser's real origin — APP_ORIGIN overrides it when set. Not needed in production
+// (Vercel has no such proxy in front of the function).
+const getRedirectUri = (req) =>
+  `${process.env.APP_ORIGIN || `${req.protocol}://${req.get('host')}`}/api/auth/callback`;
 
 const exchangeCodeForToken = async (code, redirectUri) => {
   const body = new URLSearchParams({
@@ -398,6 +514,10 @@ app.get('/api/auth/callback', async (req, res) => {
       login: me.login,
       displayName: me.usual_full_name || me.displayname || me.login,
       imageUrl: me.image?.link || me.image?.versions?.medium || null,
+      // Captured once at login so the client can default the campus dropdown to the
+      // visitor's own campus instead of "All Morocco" — not refreshed on token refresh
+      // since a student's home campus essentially never changes mid-session.
+      primaryCampusId: me.campus_users?.find((cu) => cu.is_primary)?.campus_id ?? null,
     };
 
     setSessionCookie(res, { accessToken, refreshToken, expiresAt, user });
@@ -438,6 +558,23 @@ app.get('/api/achievements/achieved-date', requireAuth, async (req, res) => {
   }
 });
 
+// Khouribga/Benguerir achievement holders are already fast to fetch (a handful of filtered
+// calls, a few seconds), so unlike the Tétouan/Rabat Paris scan this just needs a plain
+// TTL cache — no need for the async pending/ready job machinery that exists specifically to
+// handle a multi-minute operation. Cached per achievement+campus combination; "this year"
+// logins are cached separately (shared across every campus for the same achievement).
+const ACHIEVEMENT_HOLDERS_CACHE_TTL_MS = 15 * 60 * 1000;
+const achievementHoldersCache = new Map(); // `${achievementId}:${campusKey}` -> { data, cachedAt }
+const thisYearLoginsCache = new Map(); // achievementId -> { logins, cachedAt }
+
+const getThisYearLoginsCached = async (achievementId) => {
+  const cached = thisYearLoginsCache.get(achievementId);
+  if (cached && Date.now() - cached.cachedAt < ACHIEVEMENT_HOLDERS_CACHE_TTL_MS) { return cached.logins; }
+  const logins = await fetchThisYearLogins(achievementId);
+  thisYearLoginsCache.set(achievementId, { logins, cachedAt: Date.now() });
+  return logins;
+};
+
 app.get('/api/achievements/holders', requireAuth, async (req, res) => {
   const name = String(req.query.name || '').trim();
   if (!name) { return res.status(400).json({ error: 'EMPTY_NAME' }); }
@@ -455,10 +592,17 @@ app.get('/api/achievements/holders', requireAuth, async (req, res) => {
     const achievement = await findAchievementByName(name);
     if (!achievement) { return res.status(404).json({ error: 'ACHIEVEMENT_NOT_FOUND' }); }
 
+    const bypassCache = req.query.refresh === '1';
+    const cacheKey = `${achievement.id}:${requestedCampusId || 'all'}`;
+    const cached = !bypassCache && achievementHoldersCache.get(cacheKey);
+    if (cached && Date.now() - cached.cachedAt < ACHIEVEMENT_HOLDERS_CACHE_TTL_MS) {
+      return res.json({ achievement, ...cached.data });
+    }
+
     // Both filters below cost no per-holder calls: staff exclusion reads fields already on
     // the raw holder object, and the year filter is one shared, paginated lookup reused
     // across every campus.
-    const thisYearLogins = await fetchThisYearLogins(achievement.id);
+    const thisYearLogins = await getThisYearLoginsCached(achievement.id);
     const filterHolders = (rawHolders) =>
       rawHolders
         .filter((item) => !isStaffHolder(item))
@@ -473,7 +617,10 @@ app.get('/api/achievements/holders', requireAuth, async (req, res) => {
         `/achievements/${achievement.id}/users?filter[primary_campus_id]=${requestedCampusId}`,
         { maxPages: 5 },
       );
-      return res.json({ achievement, holders: filterHolders(rawHolders) });
+      const holders = filterHolders(rawHolders);
+      const data = { holders };
+      achievementHoldersCache.set(cacheKey, { data, cachedAt: Date.now() });
+      return res.json({ achievement, ...data });
     }
 
     // "All Morocco": the holder objects carry no campus field at all (verified live), so the
@@ -485,12 +632,28 @@ app.get('/api/achievements/holders', requireAuth, async (req, res) => {
         `/achievements/${achievement.id}/users?filter[primary_campus_id]=${c.id}`,
         { maxPages: 5 },
       );
-      groups.push({ campus: { id: c.id, name: c.name }, holders: filterHolders(rawHolders) });
+      const holders = filterHolders(rawHolders);
+      groups.push({ campus: { id: c.id, name: c.name }, holders });
     }
-    res.json({ achievement, groups });
+    const data = { groups };
+    achievementHoldersCache.set(cacheKey, { data, cachedAt: Date.now() });
+    res.json({ achievement, ...data });
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });
   }
+});
+
+app.get('/api/campuses/:campusId/paris-adders', requireAuth, (req, res) => {
+  const campusId = Number(req.params.campusId);
+  if (!MOROCCAN_CAMPUSES.some((c) => c.id === campusId)) {
+    return res.status(400).json({ error: 'INVALID_CAMPUS' });
+  }
+
+  const entry = getParisAddersEntry(campusId);
+  if (entry.status === 'error') {
+    return res.status(500).json({ error: entry.error });
+  }
+  res.json({ adders: entry.adders, ready: entry.status === 'ready' });
 });
 
 app.get('/api/students/:login/profile', requireAuth, async (req, res) => {
