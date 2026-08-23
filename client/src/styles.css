@@ -728,3 +728,28 @@ body {
 .footer-meta a:hover {
   text-decoration: underline;
 }
+
+.scroll-top-btn {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: var(--primary);
+  border: none;
+  color: #fff;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 40;
+  transition: opacity 0.15s, transform 0.15s;
+}
+
+.scroll-top-btn:hover {
+  transform: translateY(-2px);
+}

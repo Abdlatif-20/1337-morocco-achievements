@@ -23,6 +23,66 @@ const AUTH_ERROR_MESSAGES = {
   login_failed: 'Login with 42 failed — please try again.',
 };
 
+const STUDENTS_PER_PAGE = 10;
+
+// Every student list in this app is already fully fetched client-side (achievement holders,
+// Paris-adders), so pagination here is just a display slice — no extra API calls. Give it a
+// `key` (e.g. the campus id) wherever the underlying list can change out from under it, so
+// the page resets to 1 instead of showing a stale slice from a different list.
+const PaginatedStudentGrid = ({ students, onOpenStudent }) => {
+  const [page, setPage] = useState(1);
+  const totalPages = Math.max(1, Math.ceil(students.length / STUDENTS_PER_PAGE));
+  const clampedPage = Math.min(page, totalPages);
+  const start = (clampedPage - 1) * STUDENTS_PER_PAGE;
+  const pageStudents = students.slice(start, start + STUDENTS_PER_PAGE);
+
+  return (
+    <>
+      <div className="student-grid">
+        {pageStudents.map((s) => (
+          <StudentCard key={s.id} student={s} onOpen={() => onOpenStudent(s)} />
+        ))}
+      </div>
+      {totalPages > 1 && (
+        <div className="pagination">
+          <button type="button" onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={clampedPage === 1}>
+            ← Prev
+          </button>
+          <span>Page {clampedPage} / {totalPages}</span>
+          <button type="button" onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={clampedPage === totalPages}>
+            Next →
+          </button>
+        </div>
+      )}
+    </>
+  );
+};
+
+// Floating "back to top" arrow — hidden until the page is scrolled down a bit, since these
+// lists (especially "All Morocco") can get long.
+const ScrollToTopButton = () => {
+  const [visible, setVisible] = useState(false);
+
+  useEffect(() => {
+    const onScroll = () => setVisible(window.scrollY > 400);
+    window.addEventListener('scroll', onScroll, { passive: true });
+    return () => window.removeEventListener('scroll', onScroll);
+  }, []);
+
+  if (!visible) { return null; }
+  return (
+    <button
+      type="button"
+      className="scroll-top-btn"
+      onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
+      aria-label="Scroll to top"
+      title="Scroll to top"
+    >
+      ↑
+    </button>
+  );
+};
+
 // Small top-right avatar button — the logged-in visitor's own 42 photo, opens a one-item
 // dropdown ("Logout") on click. Closes itself on an outside click.
 const AccountMenu = ({ user, onLogout }) => {
@@ -92,11 +152,7 @@ const ParisAddersSection = ({ campusId, cached, loading, error, onLoad, onOpenSt
         No achievement holders here, but {sortedAdders.length} student(s) have 42 Paris on their profile
         {cached && !cached.ready ? ' (still checking for more)' : ''}:
       </p>
-      <div className="student-grid">
-        {sortedAdders.map((a) => (
-          <StudentCard key={a.id} student={a} onOpen={() => onOpenStudent(a)} />
-        ))}
-      </div>
+      <PaginatedStudentGrid key={campusId} students={sortedAdders} onOpenStudent={onOpenStudent} />
     </>
   );
 };
@@ -333,8 +389,17 @@ const App = () => {
         achievementResult && (
           <>
             {achievementResult.groups ? (
-              // "All Morocco": one section per campus, holders never mixed together.
-              achievementResult.groups.map((g) => (
+              <>
+                {achievementResult.groups.every((g) => g.holders.length > 0 || parisCache[g.campus.id]?.ready) && (
+                  <p className="status-text total-count">
+                    {achievementResult.groups.reduce(
+                      (sum, g) => sum + (g.holders.length > 0 ? g.holders.length : (parisCache[g.campus.id]?.adders.length ?? 0)),
+                      0,
+                    )} student(s) total across all campuses
+                  </p>
+                )}
+                {/* "All Morocco": one section per campus, holders never mixed together. */}
+                {achievementResult.groups.map((g) => (
                 <div key={g.campus.id} className="campus-group">
                   <h2 className="section-heading">
                     {g.campus.name} ({g.holders.length > 0 ? g.holders.length : (parisCache[g.campus.id]?.adders.length ?? 0)})
@@ -349,14 +414,11 @@ const App = () => {
                       onOpenStudent={openHolderDetail}
                     />
                   ) : (
-                    <div className="student-grid">
-                      {g.holders.map((h) => (
-                        <StudentCard key={h.id} student={h} onOpen={() => openHolderDetail(h)} />
-                      ))}
-                    </div>
+                    <PaginatedStudentGrid key={g.campus.id} students={g.holders} onOpenStudent={openHolderDetail} />
                   )}
                 </div>
-              ))
+                ))}
+              </>
             ) : achievementResult.holders.length === 0 ? (
               <ParisAddersSection
                 campusId={Number(selectedCampusId)}
@@ -372,11 +434,7 @@ const App = () => {
                   {achievementResult.holders.length} student(s) at{' '}
                   {campuses.find((c) => String(c.id) === selectedCampusId)?.name}
                 </p>
-                <div className="student-grid">
-                  {achievementResult.holders.map((h) => (
-                    <StudentCard key={h.id} student={h} onOpen={() => openHolderDetail(h)} />
-                  ))}
-                </div>
+                <PaginatedStudentGrid key={selectedCampusId} students={achievementResult.holders} onOpenStudent={openHolderDetail} />
               </>
             )}
           </>
@@ -403,6 +461,8 @@ const App = () => {
           aben-nei · <a href="https://profile.intra.42.fr/users/aben-nei" target="_blank" rel="noreferrer">42 Profile</a>
         </p>
       </footer>
+
+      <ScrollToTopButton />
     </div>
   );
 };
