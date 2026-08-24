@@ -391,7 +391,10 @@ const App = () => {
       {achievementError && <p className="error-text">{achievementError}</p>}
 
       {achievementLoading ? (
-        <p className="status-text">Looking up the achievement and its holders…</p>
+        <div className="inline-loading">
+          <span className="spinner" />
+          Looking up the achievement and its holders…
+        </div>
       ) : (
         achievementResult && (
           <>
