@@ -122,7 +122,7 @@ const AccountMenu = ({ user, onLogout }) => {
 // respect that: a cached result renders immediately with no network call at all, and only
 // "Refresh" (or a first-ever visit) actually asks the server, which itself just serves its
 // cache unless that cache is still warming.
-const ParisAddersSection = ({ campusId, cached, loading, error, onLoad, onOpenStudent }) => {
+const ParisAddersSection = ({ campusId, campusName, showCount = true, cached, loading, error, onLoad, onOpenStudent }) => {
   useEffect(() => {
     onLoad(campusId);
   }, [campusId]);
@@ -133,25 +133,32 @@ const ParisAddersSection = ({ campusId, cached, loading, error, onLoad, onOpenSt
   const adders = cached?.adders || [];
   if (loading && adders.length === 0) {
     return (
-      <p className="status-text">
-        No achievement holders here — checking who has 42 Paris on their profile
-        {cached && !cached.ready ? ` (${adders.length} found so far, this can take a while the first time)` : ''}…
-      </p>
+      <div className="inline-loading">
+        <span className="spinner" />
+        No achievement holders here — checking who has 42 Paris on their profile…
+      </div>
     );
   }
   if (adders.length === 0) {
     return <p className="status-text">No students hold this achievement here, and none have 42 Paris on their profile.</p>;
   }
-  // Dedupe (the scan can't produce duplicates, but cheap to guard) and sort alphabetically
-  // so the list reads consistently instead of raw campus-roster order.
+  // Dedupe (the scan can't produce duplicates, but cheap to guard), sort alphabetically so
+  // the list reads consistently instead of raw campus-roster order, and drop `campuses` —
+  // StudentCard would otherwise show "Tétouan, Paris" under every name, which is redundant
+  // with the section heading/status line right above the grid.
   const sortedAdders = [...new Map(adders.map((a) => [a.id, a])).values()]
-    .sort((a, b) => a.displayName.localeCompare(b.displayName));
+    .sort((a, b) => a.displayName.localeCompare(b.displayName))
+    .map(({ campuses, ...rest }) => rest);
   return (
     <>
-      <p className="status-text">
-        No achievement holders here, but {sortedAdders.length} student(s) have 42 Paris on their profile
-        {cached && !cached.ready ? ' (still checking for more)' : ''}:
-      </p>
+      {showCount ? (
+        <p className="status-text">
+          {sortedAdders.length} student(s) at {campusName}
+          {cached && !cached.ready ? ' (still checking for more)' : ''}
+        </p>
+      ) : (
+        cached && !cached.ready && <p className="status-text">(still checking for more)</p>
+      )}
       <PaginatedStudentGrid key={campusId} students={sortedAdders} onOpenStudent={onOpenStudent} />
     </>
   );
@@ -407,6 +414,8 @@ const App = () => {
                   {g.holders.length === 0 ? (
                     <ParisAddersSection
                       campusId={g.campus.id}
+                      campusName={g.campus.name}
+                      showCount={false}
                       cached={parisCache[g.campus.id]}
                       loading={Boolean(parisLoading[g.campus.id])}
                       error={parisError[g.campus.id]}
@@ -422,6 +431,7 @@ const App = () => {
             ) : achievementResult.holders.length === 0 ? (
               <ParisAddersSection
                 campusId={Number(selectedCampusId)}
+                campusName={campuses.find((c) => String(c.id) === selectedCampusId)?.name}
                 cached={parisCache[Number(selectedCampusId)]}
                 loading={Boolean(parisLoading[Number(selectedCampusId)])}
                 error={parisError[Number(selectedCampusId)]}
