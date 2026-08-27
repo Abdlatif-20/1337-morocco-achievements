@@ -603,6 +603,7 @@ app.get('/api/achievements/holders', requireAuth, async (req, res) => {
     const thisYearLogins = await getThisYearLoginsCached(achievement.id);
     const filterHolders = (rawHolders) =>
       rawHolders
+        .filter((item) => (item.user || item).login !== 'asabbar')
         .filter((item) => !isStaffHolder(item))
         .filter((item) => thisYearLogins.has((item.user || item).login))
         .map(mapAchievementHolder);
