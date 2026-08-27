@@ -82,6 +82,10 @@ body {
   margin-bottom: 16px;
 }
 
+.grid-controls {
+  margin-bottom: 10px;
+}
+
 .filter-select {
   display: flex;
   align-items: center;
@@ -281,12 +285,35 @@ body {
   position: absolute;
   top: 8px;
   right: 8px;
-  background: var(--primary-dim);
+  /* background: var(--primary-dim); */
   color: var(--primary);
   font-size: 10px;
   font-weight: 700;
   border-radius: 999px;
   padding: 2px 8px;
+}
+
+.student-card-owner {
+  border-color: #f5bc39;
+  background: linear-gradient(135deg, rgba(245, 188, 57, 0.1), var(--surface));
+}
+
+.student-card-owner:hover {
+  border-color: #f5bc39;
+}
+
+.student-card-owner .student-name {
+  font-size: 12px;
+}
+
+.student-badge-owner {
+  top: -10px;
+  right: -13px;
+  /* background: #f5bc39; */
+  color: #14141e;
+  font-size: 16px;
+  /* padding: 3px; */
+  /* border: 2px solid var(--background); */
 }
 
 .pagination {

@@ -223,6 +223,10 @@ const mapAchievementHolder = (item) => {
     login: u.login,
     displayName: u.usual_full_name || u.displayname || u.login,
     imageUrl: u.image?.link || u.image?.versions?.medium || null,
+    // The promo/cohort a student joined in — used for the client-side promo filter. 42's
+    // API has no gender/sex field anywhere (checked live against a full user object), so
+    // that filter genuinely isn't buildable here.
+    poolYear: u.pool_year || null,
   };
 };
 
@@ -333,6 +337,7 @@ const computeParisAdders = async (campusId) => {
         displayName: u.usual_full_name || u.displayname || u.login,
         imageUrl: u.image?.link || u.image?.versions?.medium || null,
         campuses: [CAMPUS_NAME_LOOKUP[campusId], CAMPUS_NAME_LOOKUP[PARIS_CAMPUS_ID]],
+        poolYear: u.pool_year || null,
       });
     }
   }

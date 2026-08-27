@@ -23,26 +23,55 @@ const AUTH_ERROR_MESSAGES = {
   login_failed: 'Login with 42 failed — please try again.',
 };
 
-const STUDENTS_PER_PAGE = 10;
+const PAGE_SIZE_OPTIONS = [10, 50, 100];
 
 // Every student list in this app is already fully fetched client-side (achievement holders,
-// Paris-adders), so pagination here is just a display slice — no extra API calls. Give it a
-// `key` (e.g. the campus id) wherever the underlying list can change out from under it, so
-// the page resets to 1 instead of showing a stale slice from a different list.
+// Paris-adders), so pagination/filtering here is just a display slice — no extra API calls.
+// Give it a `key` (e.g. the campus id) wherever the underlying list can change out from
+// under it, so page/filter state resets instead of showing a stale slice from a different
+// list. Promo filter uses `poolYear` (the cohort a student joined in) — 42's API has no
+// gender/sex field anywhere (checked live against a full user object), so that one isn't
+// buildable here.
 const PaginatedStudentGrid = ({ students, onOpenStudent }) => {
   const [page, setPage] = useState(1);
-  const totalPages = Math.max(1, Math.ceil(students.length / STUDENTS_PER_PAGE));
+  const [pageSize, setPageSize] = useState(PAGE_SIZE_OPTIONS[0]);
+  const [promoFilter, setPromoFilter] = useState('');
+
+  const promoYears = [...new Set(students.map((s) => s.poolYear).filter(Boolean))].sort().reverse();
+  const filtered = promoFilter ? students.filter((s) => s.poolYear === promoFilter) : students;
+  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
   const clampedPage = Math.min(page, totalPages);
-  const start = (clampedPage - 1) * STUDENTS_PER_PAGE;
-  const pageStudents = students.slice(start, start + STUDENTS_PER_PAGE);
+  const start = (clampedPage - 1) * pageSize;
+  const pageStudents = filtered.slice(start, start + pageSize);
 
   return (
     <>
-      <div className="student-grid">
-        {pageStudents.map((s) => (
-          <StudentCard key={s.id} student={s} onOpen={() => onOpenStudent(s)} />
-        ))}
+      <div className="filters-row grid-controls">
+        <label className="filter-select">
+          Show
+          <select value={pageSize} onChange={(e) => { setPageSize(Number(e.target.value)); setPage(1); }}>
+            {PAGE_SIZE_OPTIONS.map((n) => <option key={n} value={n}>{n}</option>)}
+          </select>
+        </label>
+        {promoYears.length > 0 && (
+          <label className="filter-select">
+            Promo
+            <select value={promoFilter} onChange={(e) => { setPromoFilter(e.target.value); setPage(1); }}>
+              <option value="">All</option>
+              {promoYears.map((y) => <option key={y} value={y}>{y}</option>)}
+            </select>
+          </label>
+        )}
       </div>
+      {filtered.length === 0 ? (
+        <p className="status-text">No students match this filter.</p>
+      ) : (
+        <div className="student-grid">
+          {pageStudents.map((s) => (
+            <StudentCard key={s.id} student={s} onOpen={() => onOpenStudent(s)} />
+          ))}
+        </div>
+      )}
       {totalPages > 1 && (
         <div className="pagination">
           <button type="button" onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={clampedPage === 1}>
