@@ -484,7 +484,11 @@ const App = () => {
       )}
 
       {detailError && <p className="error-text">{detailError}</p>}
-      {detailLoading && <p className="status-text">Loading profile…</p>}
+      {detailLoading && (
+        <div className="loading-overlay">
+          <div className="spinner-large" />
+        </div>
+      )}
 
       {detailStudent && (
         <StudentDetailModal
