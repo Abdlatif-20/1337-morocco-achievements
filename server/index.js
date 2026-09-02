@@ -469,8 +469,52 @@ const requireAuth = async (req, res, next) => {
   requestContext.run({ token: accessToken }, () => next());
 };
 
+// Prod moved to 42-hub.tech — these old domains stay registered (bookmarks, old links) but
+// shouldn't keep serving the app. Every request on them (page or API) gets this notice
+// instead, short-circuiting before any real route runs.
+const DEPRECATED_HOSTS = new Set([
+  '1337-7arraga.vercel.app',
+  '1337-7arraga.com',
+  'www.1337-7arraga.com',
+]);
+
+const DEPRECATED_DOMAIN_PAGE = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Domain moved</title>
+<style>
+  body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    background: #0a0a12; color: #eeeef8; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+  .card { max-width: 480px; padding: 40px 32px; text-align: center; }
+  h1 { font-size: 24px; margin: 0 0 12px; }
+  p { color: #8888a8; line-height: 1.6; margin: 0 0 8px; }
+  a { color: #4f8ef7; text-decoration: none; font-weight: 600; }
+  a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>This domain is no longer valid</h1>
+    <p>This site has moved to a new domain.</p>
+    <p>Message me on Discord (<strong>no_name_</strong>) or reach out via my
+      <a href="https://profile.intra.42.fr/users/aben-nei" target="_blank" rel="noreferrer">42 intra profile (aben-nei)</a>
+      to get the new domain.</p>
+  </div>
+</body>
+</html>`;
+
 const app = express();
 app.set('trust proxy', true); // Vercel terminates TLS in front of the function; needed so req.protocol reflects the real https scheme for the OAuth redirect_uri.
+
+app.use((req, res, next) => {
+  if (DEPRECATED_HOSTS.has(req.hostname)) {
+    return res.status(410).type('html').send(DEPRECATED_DOMAIN_PAGE);
+  }
+  next();
+});
+
 app.use(cors());
 
 app.get('/api/campuses', (req, res) => {
