@@ -9,6 +9,7 @@ import {
   fetchStudentProfile,
   logout,
 } from './api.js';
+import BackgroundMusic from './components/BackgroundMusic.jsx';
 import StudentCard from './components/StudentCard.jsx';
 import StudentDetailModal from './components/StudentDetailModal.jsx';
 
@@ -379,6 +380,7 @@ const App = () => {
 
   return (
     <div className="app">
+      <BackgroundMusic />
       <header className="header">
         <div className="header-top">
           <div>
