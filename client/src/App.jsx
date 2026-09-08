@@ -9,11 +9,19 @@ import {
   fetchStudentProfile,
   logout,
 } from './api.js';
+import { readCache, writeCache } from './browserCache.js';
 import BackgroundMusic from './components/BackgroundMusic.jsx';
 import StudentCard from './components/StudentCard.jsx';
 import StudentDetailModal from './components/StudentDetailModal.jsx';
 
 const DEFAULT_ACHIEVEMENT = 'Je voudrais un croissant';
+
+// Mirrors the server's own cache TTLs (server/index.js) — the browser cache and the server
+// cache go stale together, so a page reload never shows something the server itself would
+// already consider outdated. Achievement data changes rarely; the Paris-adders scan even
+// more rarely, hence the longer TTL there.
+const ACHIEVEMENT_CACHE_TTL_MS = 15 * 60 * 1000;
+const PARIS_CACHE_TTL_MS = 60 * 60 * 1000;
 
 // Tétouan (55) and Rabat (75) have never had a holder of this achievement — searching for it
 // there is a guaranteed-empty API call. Skip straight to the Paris-on-profile check instead.
@@ -223,8 +231,14 @@ const App = () => {
   const [achievementError, setAchievementError] = useState(null);
   const [achievementLoading, setAchievementLoading] = useState(false);
   // Keyed by campus id ('' = All Morocco) — switching back to an already-fetched campus
-  // reuses this instead of hitting the API again. Only "Refresh" bypasses it.
-  const [cache, setCache] = useState({});
+  // reuses this instead of hitting the API again. Only "Refresh" bypasses it. Hydrated from
+  // localStorage on load so even a fresh page load (not just switching campuses in-session)
+  // renders instantly from what's already known, instead of waiting on the network.
+  const [cache, setCache] = useState(() => readCache('achievementHolders', ACHIEVEMENT_CACHE_TTL_MS) || {});
+
+  useEffect(() => {
+    writeCache('achievementHolders', cache);
+  }, [cache]);
 
   const [detailStudent, setDetailStudent] = useState(null);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -245,10 +259,18 @@ const App = () => {
   // Paris-adders cache, kept in App (not the section component) so switching the campus
   // dropdown back and forth reuses what's already been fetched instead of re-scanning.
   // { [campusId]: { adders, ready } } — `ready: false` means still checking, `adders` is
-  // whatever's been found so far.
-  const [parisCache, setParisCache] = useState({});
+  // whatever's been found so far. Hydrated from localStorage like `cache` above, but only
+  // ever persists finished (`ready: true`) entries — a scan-in-progress isn't a snapshot
+  // worth restoring, since reloading mid-scan should just resume by asking the server again
+  // (which itself serves its own completed cache instantly if one already exists).
+  const [parisCache, setParisCache] = useState(() => readCache('parisAdders', PARIS_CACHE_TTL_MS) || {});
   const [parisLoading, setParisLoading] = useState({});
   const [parisError, setParisError] = useState({});
+
+  useEffect(() => {
+    const readyOnly = Object.fromEntries(Object.entries(parisCache).filter(([, v]) => v.ready));
+    writeCache('parisAdders', readyOnly);
+  }, [parisCache]);
 
   const loadParisAdders = (campusId, { force = false } = {}) => {
     // Already have a finished result and nothing asked for a refresh — don't call the API

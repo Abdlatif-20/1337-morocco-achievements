@@ -285,7 +285,8 @@ const fetchAchievedAt = async (userId, achievementId) => {
 // scanning" forever). Awaiting the scan directly, inside the request that needs it, is what
 // actually guarantees it runs to completion, on both platforms.
 const PARIS_CAMPUS_ID = 1;
-const NO_ACHIEVEMENT_CAMPUS_IDS = [55, 75]; // Tétouan, Rabat — mirrors the client-side constant
+const RABAT_CAMPUS_ID = 75;
+const NO_ACHIEVEMENT_CAMPUS_IDS = [55, RABAT_CAMPUS_ID]; // Tétouan, Rabat — mirrors the client-side constant
 const CAMPUS_NAME_LOOKUP = {
   [PARIS_CAMPUS_ID]: { id: PARIS_CAMPUS_ID, name: 'Paris', country: 'France' },
   ...Object.fromEntries(MOROCCAN_CAMPUSES.map((c) => [c.id, { id: c.id, name: c.name, country: 'Morocco' }])),
@@ -362,6 +363,7 @@ const getParisAdders = async (campusId, { bypassCache = false } = {}) => {
 // just pays the scan cost itself (well within the 300s function timeout).
 if (process.env.VERCEL !== '1') {
   for (const campusId of NO_ACHIEVEMENT_CAMPUS_IDS) {
+    if (campusId === RABAT_CAMPUS_ID) { continue; } // hardcoded empty, never scanned
     getParisAdders(campusId).catch(() => {});
   }
 }
@@ -686,10 +688,17 @@ app.get('/api/achievements/holders', requireAuth, async (req, res) => {
   }
 });
 
+// Rabat's full roster was scanned exhaustively (every non-staff student, not just a sample)
+// and came back with zero students carrying Paris on their profile — unlike Tétouan, which
+// has 27 confirmed. Scanning it again on every request/refresh is pure wasted API calls for
+// a result that's already known, so it's hardcoded empty and never fetched.
 app.get('/api/campuses/:campusId/paris-adders', requireAuth, async (req, res) => {
   const campusId = Number(req.params.campusId);
   if (!MOROCCAN_CAMPUSES.some((c) => c.id === campusId)) {
     return res.status(400).json({ error: 'INVALID_CAMPUS' });
+  }
+  if (campusId === RABAT_CAMPUS_ID) {
+    return res.json({ adders: [], ready: true });
   }
 
   try {
