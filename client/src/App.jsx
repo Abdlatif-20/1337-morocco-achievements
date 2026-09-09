@@ -41,10 +41,19 @@ const PAGE_SIZE_OPTIONS = [10, 50, 100];
 // list. Promo filter uses `poolYear` (the cohort a student joined in) — 42's API has no
 // gender/sex field anywhere (checked live against a full user object), so that one isn't
 // buildable here.
-const PaginatedStudentGrid = ({ students, onOpenStudent }) => {
+// `globalPromoFilter`/`globalPageSize` are how the "All Morocco" view applies ONE Promo
+// filter and ONE page size across every campus group at once: the parent passes its own
+// values down and this component just uses them, hiding its own per-group controls (there's
+// nothing to pick locally, since it's already been picked globally). Every other view (a
+// single campus selected, or a Paris-adders list) leaves both undefined and keeps its own
+// independent controls, since there's only ever one list on screen there anyway.
+const PaginatedStudentGrid = ({ students, onOpenStudent, globalPromoFilter, globalPageSize }) => {
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(PAGE_SIZE_OPTIONS[0]);
-  const [promoFilter, setPromoFilter] = useState('');
+  const [localPageSize, setLocalPageSize] = useState(PAGE_SIZE_OPTIONS[0]);
+  const [localPromoFilter, setLocalPromoFilter] = useState('');
+  const isGlobal = globalPromoFilter !== undefined;
+  const promoFilter = isGlobal ? globalPromoFilter : localPromoFilter;
+  const pageSize = globalPageSize !== undefined ? globalPageSize : localPageSize;
 
   const promoYears = [...new Set(students.map((s) => s.poolYear).filter(Boolean))].sort().reverse();
   const filtered = promoFilter ? students.filter((s) => s.poolYear === promoFilter) : students;
@@ -53,19 +62,26 @@ const PaginatedStudentGrid = ({ students, onOpenStudent }) => {
   const start = (clampedPage - 1) * pageSize;
   const pageStudents = filtered.slice(start, start + pageSize);
 
+  // Covers every path a filter/page-size can change through — a local control here, or a
+  // global one re-rendering this with new props — either way, page 1 is where the newly
+  // filtered/resized list should start from instead of possibly landing past its end.
+  useEffect(() => { setPage(1); }, [promoFilter, pageSize]);
+
   return (
     <>
       <div className="filters-row grid-controls">
-        <label className="filter-select">
-          Show
-          <select value={pageSize} onChange={(e) => { setPageSize(Number(e.target.value)); setPage(1); }}>
-            {PAGE_SIZE_OPTIONS.map((n) => <option key={n} value={n}>{n}</option>)}
-          </select>
-        </label>
-        {promoYears.length > 0 && (
+        {!isGlobal && (
+          <label className="filter-select">
+            Show
+            <select value={localPageSize} onChange={(e) => setLocalPageSize(Number(e.target.value))}>
+              {PAGE_SIZE_OPTIONS.map((n) => <option key={n} value={n}>{n}</option>)}
+            </select>
+          </label>
+        )}
+        {!isGlobal && promoYears.length > 0 && (
           <label className="filter-select">
             Promo
-            <select value={promoFilter} onChange={(e) => { setPromoFilter(e.target.value); setPage(1); }}>
+            <select value={localPromoFilter} onChange={(e) => setLocalPromoFilter(e.target.value)}>
               <option value="">All</option>
               {promoYears.map((y) => <option key={y} value={y}>{y}</option>)}
             </select>
@@ -160,7 +176,7 @@ const AccountMenu = ({ user, onLogout }) => {
 // respect that: a cached result renders immediately with no network call at all, and only
 // "Refresh" (or a first-ever visit) actually asks the server, which itself just serves its
 // cache unless that cache is still warming.
-const ParisAddersSection = ({ campusId, campusName, showCount = true, cached, loading, error, onLoad, onOpenStudent }) => {
+const ParisAddersSection = ({ campusId, campusName, showCount = true, cached, loading, error, onLoad, onOpenStudent, globalPromoFilter, globalPageSize }) => {
   useEffect(() => {
     onLoad(campusId);
   }, [campusId]);
@@ -197,7 +213,13 @@ const ParisAddersSection = ({ campusId, campusName, showCount = true, cached, lo
       ) : (
         cached && !cached.ready && <p className="status-text">(still checking for more)</p>
       )}
-      <PaginatedStudentGrid key={campusId} students={sortedAdders} onOpenStudent={onOpenStudent} />
+      <PaginatedStudentGrid
+        key={campusId}
+        students={sortedAdders}
+        onOpenStudent={onOpenStudent}
+        globalPromoFilter={globalPromoFilter}
+        globalPageSize={globalPageSize}
+      />
     </>
   );
 };
@@ -227,6 +249,13 @@ const App = () => {
 
   const [campuses, setCampuses] = useState([]);
   const [selectedCampusId, setSelectedCampusId] = useState('');
+  // Only meaningful in the "All Morocco" (grouped) view — one Promo filter and page size
+  // shared by every campus group instead of each group having its own. Reset whenever the
+  // campus selection changes so neither carries a stale value into a freshly picked
+  // single-campus view.
+  const [globalPromoFilter, setGlobalPromoFilter] = useState('');
+  const [globalPageSize, setGlobalPageSize] = useState(PAGE_SIZE_OPTIONS[0]);
+  useEffect(() => { setGlobalPromoFilter(''); setGlobalPageSize(PAGE_SIZE_OPTIONS[0]); }, [selectedCampusId]);
   const [achievementResult, setAchievementResult] = useState(null);
   const [achievementError, setAchievementError] = useState(null);
   const [achievementLoading, setAchievementLoading] = useState(false);
@@ -423,22 +452,6 @@ const App = () => {
             ))}
           </select>
         </label>
-
-        <button
-          type="button"
-          className="refresh-btn"
-          onClick={() => {
-            loadHolders(selectedCampusId, { force: true });
-            if (selectedCampusId && NO_ACHIEVEMENT_CAMPUS_IDS.includes(Number(selectedCampusId))) {
-              loadParisAdders(Number(selectedCampusId), { force: true });
-            } else if (!selectedCampusId) {
-              NO_ACHIEVEMENT_CAMPUS_IDS.forEach((id) => loadParisAdders(id, { force: true }));
-            }
-          }}
-          disabled={achievementLoading}
-        >
-          {achievementLoading ? 'Loading…' : 'Refresh'}
-        </button>
       </div>
 
       {achievementError && <p className="error-text">{achievementError}</p>}
@@ -461,6 +474,38 @@ const App = () => {
                     )} student(s) total across all campuses
                   </p>
                 )}
+                {(() => {
+                  // One Show (page size) and Promo control shared across every campus group,
+                  // instead of each group needing its own — Promo options built from the
+                  // union of promo years across every group's list (achievement holders
+                  // where present, Paris-adders otherwise).
+                  const allPromoYears = [...new Set(
+                    achievementResult.groups.flatMap((g) =>
+                      (g.holders.length > 0 ? g.holders : parisCache[g.campus.id]?.adders || [])
+                        .map((s) => s.poolYear)
+                        .filter(Boolean),
+                    ),
+                  )].sort().reverse();
+                  return (
+                    <div className="filters-row grid-controls">
+                      <label className="filter-select">
+                        Show
+                        <select value={globalPageSize} onChange={(e) => setGlobalPageSize(Number(e.target.value))}>
+                          {PAGE_SIZE_OPTIONS.map((n) => <option key={n} value={n}>{n}</option>)}
+                        </select>
+                      </label>
+                      {allPromoYears.length > 0 && (
+                        <label className="filter-select">
+                          Promo
+                          <select value={globalPromoFilter} onChange={(e) => setGlobalPromoFilter(e.target.value)}>
+                            <option value="">All</option>
+                            {allPromoYears.map((y) => <option key={y} value={y}>{y}</option>)}
+                          </select>
+                        </label>
+                      )}
+                    </div>
+                  );
+                })()}
                 {/* "All Morocco": one section per campus, holders never mixed together. */}
                 {achievementResult.groups.map((g) => (
                 <div key={g.campus.id} className="campus-group">
@@ -477,9 +522,17 @@ const App = () => {
                       error={parisError[g.campus.id]}
                       onLoad={loadParisAdders}
                       onOpenStudent={openHolderDetail}
+                      globalPromoFilter={globalPromoFilter}
+                      globalPageSize={globalPageSize}
                     />
                   ) : (
-                    <PaginatedStudentGrid key={g.campus.id} students={g.holders} onOpenStudent={openHolderDetail} />
+                    <PaginatedStudentGrid
+                      key={g.campus.id}
+                      students={g.holders}
+                      onOpenStudent={openHolderDetail}
+                      globalPromoFilter={globalPromoFilter}
+                      globalPageSize={globalPageSize}
+                    />
                   )}
                 </div>
                 ))}
