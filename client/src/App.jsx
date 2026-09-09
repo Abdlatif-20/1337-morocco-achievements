@@ -28,12 +28,13 @@ const PARIS_CACHE_TTL_MS = 60 * 60 * 1000;
 // there is a guaranteed-empty API call. Skip straight to the Paris-on-profile check instead.
 const NO_ACHIEVEMENT_CAMPUS_IDS = [55, 75];
 
-// Khouribga/Benguerir — the two campuses that DO have real croissant achievers. For these,
-// the Paris-adders scan (same one Tétouan/Rabat use, GET /api/campuses/:id/paris-adders) is
-// fetched quietly in the background purely to cross-reference: any holder who's ALSO in that
-// campus's Paris-adders list, recently, gets a ✈️ badge flagging them as having just switched
-// their profile's campus to Paris. Doesn't gate or slow down the holders list itself.
-const CROISSANT_CAMPUS_IDS = [16, 21];
+// For any campus with real holders shown, the Paris-adders scan (same one Tétouan/Rabat's
+// fallback view uses, GET /api/campuses/:id/paris-adders) is fetched quietly in the
+// background purely to cross-reference: any holder who's ALSO in that campus's Paris-adders
+// list, recently, gets a ✈️ badge flagging them as having just switched their profile's
+// campus to Paris. Doesn't gate or slow down the holders list itself. Which campuses have
+// holders isn't a fixed pair — it changes over time (Tétouan, once always empty, now
+// genuinely has some) — so this runs for whichever campus the holders result actually covers.
 const RECENT_PARIS_MOVE_MS = 60 * 24 * 60 * 60 * 1000; // 60 days
 
 // The Refresh button bypasses every cache layer (server TTL cache + browser localStorage
@@ -255,16 +256,21 @@ const RecentParisSwitchersSection = ({ students, loading, onOpenStudent }) => {
       </div>
     );
   }
-  if (students.length === 0) { return null; }
   const sorted = [...students].sort((a, b) => a.displayName.localeCompare(b.displayName));
   return (
     <div className="campus-group">
       <h2 className="section-heading">✈️ Recently switched to 42 Paris ({sorted.length})</h2>
-      <div className="student-grid">
-        {sorted.map((s) => (
-          <StudentCard key={s.id} student={s} onOpen={() => onOpenStudent(s)} />
-        ))}
-      </div>
+      {sorted.length === 0 ? (
+        <p className="status-text">
+          No students here have switched their primary campus to 42 Paris since August.
+        </p>
+      ) : (
+        <div className="student-grid">
+          {sorted.map((s) => (
+            <StudentCard key={s.id} student={s} onOpen={() => onOpenStudent(s)} />
+          ))}
+        </div>
+      )}
     </div>
   );
 };
@@ -418,15 +424,6 @@ const App = () => {
       return;
     }
 
-    if (campusId && NO_ACHIEVEMENT_CAMPUS_IDS.includes(Number(campusId))) {
-      const empty = { achievement: null, holders: [] };
-      setAchievementResult(empty);
-      setCache((prev) => ({ ...prev, [key]: empty }));
-      setAchievementError(null);
-      setAchievementLoading(false);
-      return;
-    }
-
     setAchievementLoading(true);
     setAchievementError(null);
     setAchievementResult(null);
@@ -462,24 +459,23 @@ const App = () => {
   // list itself.
   useEffect(() => {
     if (!achievementResult) { return; }
+    // Which campuses actually have holders shown right now changes over time (Tétouan, once
+    // always empty, now genuinely has some) — so this runs for any campus with holders,
+    // not a fixed hardcoded pair.
     const campusIdsWithHolders = achievementResult.groups
       ? achievementResult.groups.filter((g) => g.holders.length > 0).map((g) => g.campus.id)
       : achievementResult.holders?.length > 0 && selectedCampusId
         ? [Number(selectedCampusId)]
         : [];
-    campusIdsWithHolders
-      .filter((id) => CROISSANT_CAMPUS_IDS.includes(id))
-      .forEach((id) => loadParisAdders(id));
+    campusIdsWithHolders.forEach((id) => loadParisAdders(id));
   }, [achievementResult]);
 
-  // The achievement-gated switchers list is one shared fetch (not per campus), so it's
-  // triggered once, whenever the holders list includes ANY Khouribga/Benguerir data.
+  // The achievement-gated switchers list is one shared fetch (not per campus) — triggered
+  // once whenever there's a holders result to show it alongside, regardless of which
+  // Moroccan campus(es) that result covers.
   useEffect(() => {
     if (!achievementResult) { return; }
-    const hasCroissantCampus = achievementResult.groups
-      ? achievementResult.groups.some((g) => CROISSANT_CAMPUS_IDS.includes(g.campus.id))
-      : CROISSANT_CAMPUS_IDS.includes(Number(selectedCampusId));
-    if (hasCroissantCampus) { loadParisSwitchers(); }
+    loadParisSwitchers();
   }, [achievementResult]);
 
   // null when the student isn't a recent Paris-adder for this campus, otherwise the date
@@ -492,9 +488,7 @@ const App = () => {
   };
 
   const withRecentParisFlag = (campusId, holders) =>
-    CROISSANT_CAMPUS_IDS.includes(campusId)
-      ? holders.map((h) => ({ ...h, recentParisMove: Boolean(getRecentParisJoin(campusId, h.login)) }))
-      : holders;
+    holders.map((h) => ({ ...h, recentParisMove: Boolean(getRecentParisJoin(campusId, h.login)) }));
 
   // The achieved date is fetched lazily here, only for the one student actually opened —
   // not for every card in the list (that was an earlier slowdown).
@@ -670,44 +664,44 @@ const App = () => {
                       globalPageSize={globalPageSize}
                     />
                   )}
-                  {CROISSANT_CAMPUS_IDS.includes(g.campus.id) && (
-                    <RecentParisSwitchersSection
-                      students={switchers.filter((s) => s.campusId === g.campus.id)}
-                      loading={switchersLoading}
-                      onOpenStudent={openHolderDetail}
-                    />
-                  )}
-                </div>
-                ))}
-              </>
-            ) : achievementResult.holders.length === 0 ? (
-              <ParisAddersSection
-                campusId={Number(selectedCampusId)}
-                campusName={campuses.find((c) => String(c.id) === selectedCampusId)?.name}
-                cached={parisCache[Number(selectedCampusId)]}
-                loading={Boolean(parisLoading[Number(selectedCampusId)])}
-                error={parisError[Number(selectedCampusId)]}
-                onLoad={loadParisAdders}
-                onOpenStudent={openHolderDetail}
-              />
-            ) : (
-              <>
-                <p className="status-text">
-                  {achievementResult.holders.length} student(s) at{' '}
-                  {campuses.find((c) => String(c.id) === selectedCampusId)?.name}
-                </p>
-                <PaginatedStudentGrid
-                  key={selectedCampusId}
-                  students={withRecentParisFlag(Number(selectedCampusId), achievementResult.holders)}
-                  onOpenStudent={openHolderDetail}
-                />
-                {CROISSANT_CAMPUS_IDS.includes(Number(selectedCampusId)) && (
                   <RecentParisSwitchersSection
-                    students={switchers.filter((s) => s.campusId === Number(selectedCampusId))}
+                    students={switchers.filter((s) => s.campusId === g.campus.id)}
                     loading={switchersLoading}
                     onOpenStudent={openHolderDetail}
                   />
+                </div>
+                ))}
+              </>
+            ) : (
+              <>
+                {achievementResult.holders.length === 0 ? (
+                  <ParisAddersSection
+                    campusId={Number(selectedCampusId)}
+                    campusName={campuses.find((c) => String(c.id) === selectedCampusId)?.name}
+                    cached={parisCache[Number(selectedCampusId)]}
+                    loading={Boolean(parisLoading[Number(selectedCampusId)])}
+                    error={parisError[Number(selectedCampusId)]}
+                    onLoad={loadParisAdders}
+                    onOpenStudent={openHolderDetail}
+                  />
+                ) : (
+                  <>
+                    <p className="status-text">
+                      {achievementResult.holders.length} student(s) at{' '}
+                      {campuses.find((c) => String(c.id) === selectedCampusId)?.name}
+                    </p>
+                    <PaginatedStudentGrid
+                      key={selectedCampusId}
+                      students={withRecentParisFlag(Number(selectedCampusId), achievementResult.holders)}
+                      onOpenStudent={openHolderDetail}
+                    />
+                  </>
                 )}
+                <RecentParisSwitchersSection
+                  students={switchers.filter((s) => s.campusId === Number(selectedCampusId))}
+                  loading={switchersLoading}
+                  onOpenStudent={openHolderDetail}
+                />
               </>
             )}
           </>
