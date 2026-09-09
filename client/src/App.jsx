@@ -6,10 +6,11 @@ import {
   fetchAllCampusParisAdders,
   fetchCampuses,
   fetchMe,
+  fetchAchievementParisSwitchers,
   fetchStudentProfile,
   logout,
 } from './api.js';
-import { readCache, writeCache } from './browserCache.js';
+import { getRecentUses, readCache, recordUse, writeCache } from './browserCache.js';
 import BackgroundMusic from './components/BackgroundMusic.jsx';
 import StudentCard from './components/StudentCard.jsx';
 import StudentDetailModal from './components/StudentDetailModal.jsx';
@@ -26,6 +27,22 @@ const PARIS_CACHE_TTL_MS = 60 * 60 * 1000;
 // Tétouan (55) and Rabat (75) have never had a holder of this achievement — searching for it
 // there is a guaranteed-empty API call. Skip straight to the Paris-on-profile check instead.
 const NO_ACHIEVEMENT_CAMPUS_IDS = [55, 75];
+
+// Khouribga/Benguerir — the two campuses that DO have real croissant achievers. For these,
+// the Paris-adders scan (same one Tétouan/Rabat use, GET /api/campuses/:id/paris-adders) is
+// fetched quietly in the background purely to cross-reference: any holder who's ALSO in that
+// campus's Paris-adders list, recently, gets a ✈️ badge flagging them as having just switched
+// their profile's campus to Paris. Doesn't gate or slow down the holders list itself.
+const CROISSANT_CAMPUS_IDS = [16, 21];
+const RECENT_PARIS_MOVE_MS = 60 * 24 * 60 * 60 * 1000; // 60 days
+
+// The Refresh button bypasses every cache layer (server TTL cache + browser localStorage
+// cache) and hits 42's API directly, so it's the one action in this app that can actually
+// burn through 42's rate limit if clicked repeatedly — capped client-side to a few uses per
+// rolling hour, tracked in localStorage so it survives a page reload.
+const REFRESH_LIMIT = 3;
+const REFRESH_WINDOW_MS = 60 * 60 * 1000;
+const REFRESH_USE_KEY = 'refreshClicks';
 
 const AUTH_ERROR_MESSAGES = {
   invalid_state: 'Login could not be verified — please try again.',
@@ -224,6 +241,34 @@ const ParisAddersSection = ({ campusId, campusName, showCount = true, cached, lo
   );
 };
 
+// Shown under Khouribga/Benguerir's achievement holders (whether or not that list itself has
+// results) — students the API's filter[primary_campus_id] can no longer see (their primary
+// campus is now Paris) but who genuinely made that switch recently. The parent already
+// triggers the background Paris-adders fetch this reads from (same one powering the ✈️
+// badge), so this never fires its own network request.
+const RecentParisSwitchersSection = ({ students, loading, onOpenStudent }) => {
+  if (loading && students.length === 0) {
+    return (
+      <div className="inline-loading">
+        <span className="spinner" />
+        Checking for students who recently switched to 42 Paris…
+      </div>
+    );
+  }
+  if (students.length === 0) { return null; }
+  const sorted = [...students].sort((a, b) => a.displayName.localeCompare(b.displayName));
+  return (
+    <div className="campus-group">
+      <h2 className="section-heading">✈️ Recently switched to 42 Paris ({sorted.length})</h2>
+      <div className="student-grid">
+        {sorted.map((s) => (
+          <StudentCard key={s.id} student={s} onOpen={() => onOpenStudent(s)} />
+        ))}
+      </div>
+    </div>
+  );
+};
+
 const App = () => {
   // `me`: undefined = still checking, null = not logged in, object = the logged-in visitor.
   // Every data route on the server requires this session and uses the visitor's own 42
@@ -259,6 +304,8 @@ const App = () => {
   const [achievementResult, setAchievementResult] = useState(null);
   const [achievementError, setAchievementError] = useState(null);
   const [achievementLoading, setAchievementLoading] = useState(false);
+  const [refreshUses, setRefreshUses] = useState(() => getRecentUses(REFRESH_USE_KEY, REFRESH_WINDOW_MS));
+  const refreshesLeft = Math.max(0, REFRESH_LIMIT - refreshUses.length);
   // Keyed by campus id ('' = All Morocco) — switching back to an already-fetched campus
   // reuses this instead of hitting the API again. Only "Refresh" bypasses it. Hydrated from
   // localStorage on load so even a fresh page load (not just switching campuses in-session)
@@ -324,6 +371,36 @@ const App = () => {
       });
   };
 
+  // The achievement-gated version of the Paris-adders scan — students who genuinely hold the
+  // achievement this year AND made Paris their primary campus since August, which is exactly
+  // the group invisible to the normal per-campus holders query. Scoped to this achievement's
+  // this-year holders only (a few hundred, worldwide), NOT a full campus roster scan, so it's
+  // one shared fetch for every campus instead of one scan per campus — each result already
+  // carries its own `campusId` (the Moroccan campus it's grouped under).
+  const [switchers, setSwitchers] = useState(() => readCache('parisSwitchers', ACHIEVEMENT_CACHE_TTL_MS) || []);
+  const [switchersReady, setSwitchersReady] = useState(switchers.length > 0);
+  const [switchersLoading, setSwitchersLoading] = useState(false);
+
+  useEffect(() => {
+    if (switchersReady) { writeCache('parisSwitchers', switchers); }
+  }, [switchers, switchersReady]);
+
+  const loadParisSwitchers = ({ force = false } = {}) => {
+    if (!force && switchersReady) { return; }
+    if (switchersLoading) { return; }
+
+    setSwitchersLoading(true);
+    fetchAchievementParisSwitchers(DEFAULT_ACHIEVEMENT, { refresh: force })
+      .then((res) => {
+        setSwitchers(res.switchers);
+        setSwitchersReady(true);
+      })
+      .catch((err) => {
+        if (err.status === 401) { setMe(null); return; }
+      })
+      .finally(() => setSwitchersLoading(false));
+  };
+
   // Guards against out-of-order responses: switching from "All Morocco" to a specific campus
   // fires two requests in quick succession (mount defaults to '', then the visitor's own
   // campus effect fires right after) — the slower "All Morocco" one can resolve AFTER the
@@ -378,6 +455,46 @@ const App = () => {
     if (!me) { return; }
     loadHolders(selectedCampusId);
   }, [me, selectedCampusId]);
+
+  // Whenever the holders list resolves and it includes Khouribga/Benguerir with real
+  // holders, quietly kick off (or reuse the cache of) the per-campus raw Paris-adders scan
+  // (powers the ✈️ badge on existing holder cards) — doesn't block or slow down the holders
+  // list itself.
+  useEffect(() => {
+    if (!achievementResult) { return; }
+    const campusIdsWithHolders = achievementResult.groups
+      ? achievementResult.groups.filter((g) => g.holders.length > 0).map((g) => g.campus.id)
+      : achievementResult.holders?.length > 0 && selectedCampusId
+        ? [Number(selectedCampusId)]
+        : [];
+    campusIdsWithHolders
+      .filter((id) => CROISSANT_CAMPUS_IDS.includes(id))
+      .forEach((id) => loadParisAdders(id));
+  }, [achievementResult]);
+
+  // The achievement-gated switchers list is one shared fetch (not per campus), so it's
+  // triggered once, whenever the holders list includes ANY Khouribga/Benguerir data.
+  useEffect(() => {
+    if (!achievementResult) { return; }
+    const hasCroissantCampus = achievementResult.groups
+      ? achievementResult.groups.some((g) => CROISSANT_CAMPUS_IDS.includes(g.campus.id))
+      : CROISSANT_CAMPUS_IDS.includes(Number(selectedCampusId));
+    if (hasCroissantCampus) { loadParisSwitchers(); }
+  }, [achievementResult]);
+
+  // null when the student isn't a recent Paris-adder for this campus, otherwise the date
+  // Paris was added to their profile — recency is judged against RECENT_PARIS_MOVE_MS.
+  const getRecentParisJoin = (campusId, login) => {
+    const match = parisCache[campusId]?.adders?.find((a) => a.login === login);
+    if (!match?.parisJoinedAt) { return null; }
+    const age = Date.now() - new Date(match.parisJoinedAt).getTime();
+    return age >= 0 && age < RECENT_PARIS_MOVE_MS ? match.parisJoinedAt : null;
+  };
+
+  const withRecentParisFlag = (campusId, holders) =>
+    CROISSANT_CAMPUS_IDS.includes(campusId)
+      ? holders.map((h) => ({ ...h, recentParisMove: Boolean(getRecentParisJoin(campusId, h.login)) }))
+      : holders;
 
   // The achieved date is fetched lazily here, only for the one student actually opened —
   // not for every card in the list (that was an earlier slowdown).
@@ -452,6 +569,25 @@ const App = () => {
             ))}
           </select>
         </label>
+
+        <button
+          type="button"
+          className="refresh-btn"
+          onClick={() => {
+            if (refreshesLeft <= 0) { return; }
+            setRefreshUses(recordUse(REFRESH_USE_KEY, REFRESH_WINDOW_MS));
+            loadHolders(selectedCampusId, { force: true });
+            if (selectedCampusId && NO_ACHIEVEMENT_CAMPUS_IDS.includes(Number(selectedCampusId))) {
+              loadParisAdders(Number(selectedCampusId), { force: true });
+            } else if (!selectedCampusId) {
+              NO_ACHIEVEMENT_CAMPUS_IDS.forEach((id) => loadParisAdders(id, { force: true }));
+            }
+          }}
+          disabled={achievementLoading || refreshesLeft <= 0}
+          title={refreshesLeft <= 0 ? 'Refresh limit reached — try again in a bit' : `${refreshesLeft} refresh(es) left this hour`}
+        >
+          {achievementLoading ? 'Loading…' : refreshesLeft <= 0 ? 'Limit reached' : `Refresh (${refreshesLeft})`}
+        </button>
       </div>
 
       {achievementError && <p className="error-text">{achievementError}</p>}
@@ -528,10 +664,17 @@ const App = () => {
                   ) : (
                     <PaginatedStudentGrid
                       key={g.campus.id}
-                      students={g.holders}
+                      students={withRecentParisFlag(g.campus.id, g.holders)}
                       onOpenStudent={openHolderDetail}
                       globalPromoFilter={globalPromoFilter}
                       globalPageSize={globalPageSize}
+                    />
+                  )}
+                  {CROISSANT_CAMPUS_IDS.includes(g.campus.id) && (
+                    <RecentParisSwitchersSection
+                      students={switchers.filter((s) => s.campusId === g.campus.id)}
+                      loading={switchersLoading}
+                      onOpenStudent={openHolderDetail}
                     />
                   )}
                 </div>
@@ -553,7 +696,18 @@ const App = () => {
                   {achievementResult.holders.length} student(s) at{' '}
                   {campuses.find((c) => String(c.id) === selectedCampusId)?.name}
                 </p>
-                <PaginatedStudentGrid key={selectedCampusId} students={achievementResult.holders} onOpenStudent={openHolderDetail} />
+                <PaginatedStudentGrid
+                  key={selectedCampusId}
+                  students={withRecentParisFlag(Number(selectedCampusId), achievementResult.holders)}
+                  onOpenStudent={openHolderDetail}
+                />
+                {CROISSANT_CAMPUS_IDS.includes(Number(selectedCampusId)) && (
+                  <RecentParisSwitchersSection
+                    students={switchers.filter((s) => s.campusId === Number(selectedCampusId))}
+                    loading={switchersLoading}
+                    onOpenStudent={openHolderDetail}
+                  />
+                )}
               </>
             )}
           </>

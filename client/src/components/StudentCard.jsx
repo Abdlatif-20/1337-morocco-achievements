@@ -33,6 +33,9 @@ const StudentCard = ({ student, onOpen }) => {
       {isOwner ? (
         <span className="student-badge student-badge-owner" title="Owner — built this site">👑</span>
       ) : student.isStaff && <span className="student-badge">Staff</span>}
+      {student.recentParisMove && (
+        <span className="student-badge student-badge-flight" title="Recently added 42 Paris to their profile">✈️</span>
+      )}
       <a
         className="student-intra-arrow"
         href={`https://profile.intra.42.fr/users/${student.login}`}

@@ -344,6 +344,15 @@ button {
   filter: drop-shadow(0 2px 3px rgba(0, 0, 0, 0.4));
 }
 
+.student-badge-flight {
+  flex-shrink: 0;
+  background: var(--primary-dim);
+  border: 1px solid var(--border);
+  font-size: 13px;
+  padding: 4px 8px;
+  margin-left: 6px;
+}
+
 .student-intra-arrow {
   flex-shrink: 0;
   width: 28px;

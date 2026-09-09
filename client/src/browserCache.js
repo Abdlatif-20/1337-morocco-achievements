@@ -24,3 +24,28 @@ export const writeCache = (key, value) => {
     // Storage full/unavailable — the app still works, just without the speedup.
   }
 };
+
+// Tracks how many times a rate-limited action (e.g. the Refresh button) has been used within
+// a rolling time window, persisted in localStorage so the limit survives a page reload —
+// it's a per-visitor client-side throttle, not a security boundary (nothing stops someone
+// from clearing localStorage), just a guard against accidentally hammering the API.
+export const getRecentUses = (key, windowMs) => {
+  try {
+    const raw = localStorage.getItem(PREFIX + key);
+    const timestamps = raw ? JSON.parse(raw) : [];
+    return timestamps.filter((t) => Date.now() - t < windowMs);
+  } catch {
+    return [];
+  }
+};
+
+export const recordUse = (key, windowMs) => {
+  const recent = getRecentUses(key, windowMs);
+  recent.push(Date.now());
+  try {
+    localStorage.setItem(PREFIX + key, JSON.stringify(recent));
+  } catch {
+    // Storage full/unavailable — worst case the limit just doesn't persist across reloads.
+  }
+  return recent;
+};

@@ -38,6 +38,17 @@ export const fetchAllCampusParisAdders = (campusId, onProgress, { refresh = fals
   return fetchCampusParisAdders(campusId, { refresh }).then((res) => res.adders);
 };
 
+// Students who still hold this achievement but vanished from the normal per-campus holders
+// list because their primary campus is now Paris (42's API filters holders by CURRENT
+// primary campus). One call for the whole achievement — scoped to this-year holders only
+// (not a full campus roster scan) — each result tagged with `campusId`, the Moroccan campus
+// they're originally from, so the client can bucket them into the right section.
+export const fetchAchievementParisSwitchers = (name, { refresh = false } = {}) =>
+  request(
+    `/api/achievements/paris-switchers?name=${encodeURIComponent(name)}` +
+      (refresh ? '&refresh=1' : ''),
+  );
+
 // Auth — visitors log in with their own 42 account (authorization_code flow); every data
 // route above requires this session and uses the visitor's own access token server-side.
 export const LOGIN_URL = '/api/auth/login';
