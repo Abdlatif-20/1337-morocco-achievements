@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   LOGIN_URL,
   fetchAchievedDate,
@@ -89,21 +90,20 @@ const PaginatedStudentGrid = ({ students, onOpenStudent, globalPromoFilter, glob
     <>
       <div className="filters-row grid-controls">
         {!isGlobal && (
-          <label className="filter-select">
-            Show
-            <select value={localPageSize} onChange={(e) => setLocalPageSize(Number(e.target.value))}>
-              {PAGE_SIZE_OPTIONS.map((n) => <option key={n} value={n}>{n}</option>)}
-            </select>
-          </label>
+          <Dropdown
+            label="Show"
+            value={localPageSize}
+            options={PAGE_SIZE_OPTIONS.map((n) => ({ value: n, label: String(n) }))}
+            onChange={(v) => setLocalPageSize(Number(v))}
+          />
         )}
         {!isGlobal && promoYears.length > 0 && (
-          <label className="filter-select">
-            Promo
-            <select value={localPromoFilter} onChange={(e) => setLocalPromoFilter(e.target.value)}>
-              <option value="">All</option>
-              {promoYears.map((y) => <option key={y} value={y}>{y}</option>)}
-            </select>
-          </label>
+          <Dropdown
+            label="Promo"
+            value={localPromoFilter}
+            options={[{ value: '', label: 'All' }, ...promoYears.map((y) => ({ value: y, label: String(y) }))]}
+            onChange={setLocalPromoFilter}
+          />
         )}
       </div>
       {filtered.length === 0 ? (
@@ -187,6 +187,77 @@ const AccountMenu = ({ user, onLogout }) => {
     </div>
   );
 };
+
+// Generic custom picker — a button showing the current selection that opens a floating list
+// of options, instead of a native <select>. Same open/close-on-outside-click pattern as
+// AccountMenu above. `options` is [{ value, label }]; `label`, if given, renders as a
+// non-interactive prefix (e.g. "Show", "Promo") the way the old <label className="filter-
+// select"> selects did.
+const Dropdown = ({ label, value, options, onChange }) => {
+  const [open, setOpen] = useState(false);
+  const [menuPos, setMenuPos] = useState(null);
+  const wrapRef = useRef(null);
+  const btnRef = useRef(null);
+  const menuRef = useRef(null);
+
+  useEffect(() => {
+    if (!open) { return; }
+    const close = (e) => {
+      if (wrapRef.current?.contains(e.target)) { return; }
+      if (menuRef.current?.contains(e.target)) { return; }
+      setOpen(false);
+    };
+    document.addEventListener('click', close);
+    return () => document.removeEventListener('click', close);
+  }, [open]);
+
+  const toggleOpen = () => {
+    if (!open && btnRef.current) {
+      const rect = btnRef.current.getBoundingClientRect();
+      setMenuPos({ top: rect.bottom + 6, left: rect.left });
+    }
+    setOpen((v) => !v);
+  };
+
+  const current = options.find((o) => String(o.value) === String(value)) ?? options[0];
+
+  return (
+    <div className="dropdown-wrap" ref={wrapRef}>
+      {label && <span className="dropdown-label">{label}</span>}
+      <div className="dropdown">
+        <button ref={btnRef} type="button" className="dropdown-btn" onClick={toggleOpen}>
+          {current?.label}
+          <span className={`dropdown-chevron${open ? ' dropdown-chevron-open' : ''}`}>▾</span>
+        </button>
+        {open && menuPos && (
+          createPortal(
+            <div ref={menuRef} className="dropdown-menu" style={{ position: 'fixed', top: menuPos.top, left: menuPos.left }}>
+              {options.map((o) => (
+                <button
+                  key={o.value}
+                  type="button"
+                  className={`dropdown-option${String(o.value) === String(value) ? ' dropdown-option-active' : ''}`}
+                  onClick={() => { onChange(o.value); setOpen(false); }}
+                >
+                  {o.label}
+                </button>
+              ))}
+            </div>,
+            document.body,
+          )
+        )}
+      </div>
+    </div>
+  );
+};
+
+const CampusDropdown = ({ campuses, selectedCampusId, onChange }) => (
+  <Dropdown
+    value={selectedCampusId}
+    options={[{ value: '', label: 'All Morocco' }, ...campuses.map((c) => ({ value: String(c.id), label: c.name }))]}
+    onChange={onChange}
+  />
+);
 
 // Fallback shown for a campus with zero achievement holders (Tétouan/Rabat, always empty so
 // far): students there who have 42 Paris on their profile. The server caches this per campus
@@ -300,6 +371,10 @@ const App = () => {
 
   const [campuses, setCampuses] = useState([]);
   const [selectedCampusId, setSelectedCampusId] = useState('');
+  // When on, hides the normal holders/Paris-adders view entirely and shows only the
+  // "✈️ Recently switched to 42 Paris" section(s) — the underlying data is already fetched
+  // either way, this is purely a display filter.
+  const [switchersOnly, setSwitchersOnly] = useState(false);
   // Only meaningful in the "All Morocco" (grouped) view — one Promo filter and page size
   // shared by every campus group instead of each group having its own. Reset whenever the
   // campus selection changes so neither carries a stale value into a freshly picked
@@ -482,7 +557,7 @@ const App = () => {
   // Paris was added to their profile — recency is judged against RECENT_PARIS_MOVE_MS.
   const getRecentParisJoin = (campusId, login) => {
     const match = parisCache[campusId]?.adders?.find((a) => a.login === login);
-    if (!match?.parisJoinedAt) { return null; }
+    if (!match?.parisJoinedAt || !match.isPrimary) { return null; }
     const age = Date.now() - new Date(match.parisJoinedAt).getTime();
     return age >= 0 && age < RECENT_PARIS_MOVE_MS ? match.parisJoinedAt : null;
   };
@@ -554,14 +629,16 @@ const App = () => {
       </header>
 
       <div className="filters-row">
-        <label className="filter-select">
-          Campus
-          <select value={selectedCampusId} onChange={(e) => setSelectedCampusId(e.target.value)}>
-            <option value="">All Morocco</option>
-            {campuses.map((c) => (
-              <option key={c.id} value={c.id}>{c.name}</option>
-            ))}
-          </select>
+        <CampusDropdown campuses={campuses} selectedCampusId={selectedCampusId} onChange={setSelectedCampusId} />
+
+        <label className="switch-toggle">
+          <input
+            type="checkbox"
+            checked={switchersOnly}
+            onChange={(e) => setSwitchersOnly(e.target.checked)}
+          />
+          <span className="switch-track" />
+          ✈️ Paris switchers
         </label>
 
         <button
@@ -594,7 +671,29 @@ const App = () => {
       ) : (
         achievementResult && (
           <>
-            {achievementResult.groups ? (
+            {switchersOnly ? (
+              // Toggle is on: skip the normal holders/Paris-adders view entirely and show
+              // only the "recently switched" section(s) — same underlying data, already
+              // fetched either way, just a display filter.
+              achievementResult.groups ? (
+                achievementResult.groups.map((g) => (
+                  <div key={g.campus.id} className="campus-group">
+                    <h2 className="section-heading">{g.campus.name}</h2>
+                    <RecentParisSwitchersSection
+                      students={switchers.filter((s) => s.campusId === g.campus.id)}
+                      loading={switchersLoading}
+                      onOpenStudent={openHolderDetail}
+                    />
+                  </div>
+                ))
+              ) : (
+                <RecentParisSwitchersSection
+                  students={switchers.filter((s) => s.campusId === Number(selectedCampusId))}
+                  loading={switchersLoading}
+                  onOpenStudent={openHolderDetail}
+                />
+              )
+            ) : achievementResult.groups ? (
               <>
                 {achievementResult.groups.every((g) => g.holders.length > 0 || parisCache[g.campus.id]?.ready) && (
                   <p className="status-text total-count">
@@ -618,20 +717,19 @@ const App = () => {
                   )].sort().reverse();
                   return (
                     <div className="filters-row grid-controls">
-                      <label className="filter-select">
-                        Show
-                        <select value={globalPageSize} onChange={(e) => setGlobalPageSize(Number(e.target.value))}>
-                          {PAGE_SIZE_OPTIONS.map((n) => <option key={n} value={n}>{n}</option>)}
-                        </select>
-                      </label>
+                      <Dropdown
+                        label="Show"
+                        value={globalPageSize}
+                        options={PAGE_SIZE_OPTIONS.map((n) => ({ value: n, label: String(n) }))}
+                        onChange={(v) => setGlobalPageSize(Number(v))}
+                      />
                       {allPromoYears.length > 0 && (
-                        <label className="filter-select">
-                          Promo
-                          <select value={globalPromoFilter} onChange={(e) => setGlobalPromoFilter(e.target.value)}>
-                            <option value="">All</option>
-                            {allPromoYears.map((y) => <option key={y} value={y}>{y}</option>)}
-                          </select>
-                        </label>
+                        <Dropdown
+                          label="Promo"
+                          value={globalPromoFilter}
+                          options={[{ value: '', label: 'All' }, ...allPromoYears.map((y) => ({ value: y, label: String(y) }))]}
+                          onChange={setGlobalPromoFilter}
+                        />
                       )}
                     </div>
                   );

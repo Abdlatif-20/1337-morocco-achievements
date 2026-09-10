@@ -120,6 +120,18 @@ button {
   backdrop-filter: blur(20px);
 }
 
+/* backdrop-filter above creates its own stacking context on .filters-row — without an
+   explicit z-index, later normal-flow siblings (campus-group headings, student cards) paint
+   ABOVE that whole layer regardless of any z-index set on children inside it, which was
+   cutting off dropdown menus (campus picker, and Show/Promo inside grid-controls). Applies to
+   every .filters-row including .grid-controls instances — same z-index level means DOM order
+   still resolves paint order between multiple toolbars, so this doesn't reintroduce clipping
+   between separate sections. */
+.filters-row {
+  position: relative;
+  z-index: 30;
+}
+
 .grid-controls {
   padding: 10px 4px;
   background: none;
@@ -152,6 +164,144 @@ button {
   border-color: var(--primary);
   outline: none;
   box-shadow: 0 0 0 3px var(--primary-dim);
+}
+
+.dropdown-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.dropdown-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.dropdown {
+  position: relative;
+}
+
+.dropdown-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+  border-radius: var(--radius-sm);
+  padding: 7px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.dropdown-btn:hover,
+.dropdown-btn:focus {
+  border-color: var(--primary);
+  outline: none;
+  box-shadow: 0 0 0 3px var(--primary-dim);
+}
+
+.dropdown-chevron {
+  font-size: 10px;
+  color: var(--text-secondary);
+  transition: transform 0.15s ease;
+}
+
+.dropdown-chevron-open {
+  transform: rotate(180deg);
+}
+
+.dropdown-menu {
+  background: var(--surface-solid);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  padding: 6px;
+  min-width: 180px;
+  z-index: 1000;
+  box-shadow: var(--shadow-md);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.dropdown-option {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  text-align: left;
+  font-size: 13px;
+  font-weight: 500;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.dropdown-option:hover {
+  background: var(--surface-2);
+  color: var(--text-primary);
+}
+
+.dropdown-option-active {
+  background: var(--primary-dim);
+  color: var(--primary-2);
+  font-weight: 700;
+}
+
+.switch-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  font-weight: 500;
+  cursor: pointer;
+  user-select: none;
+}
+
+.switch-toggle input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.switch-track {
+  position: relative;
+  width: 38px;
+  height: 22px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  flex-shrink: 0;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.switch-track::before {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--text-secondary);
+  transition: transform 0.15s ease, background 0.15s ease;
+}
+
+.switch-toggle input:checked + .switch-track {
+  background: var(--primary-gradient);
+  border-color: transparent;
+}
+
+.switch-toggle input:checked + .switch-track::before {
+  transform: translateX(16px);
+  background: #fff;
 }
 
 .refresh-btn {
