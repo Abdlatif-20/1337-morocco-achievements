@@ -14,12 +14,56 @@ export const fetchCampuses = () => request('/api/campuses');
 export const fetchStudentProfile = (login) =>
   request(`/api/students/${encodeURIComponent(login)}/profile`);
 
-export const fetchAchievementHolders = (name, campusId = null, { refresh = false } = {}) =>
-  request(
+// Single-campus holders stream as newline-delimited JSON (see server/index.js) so the first
+// upstream page's worth of cards can render immediately instead of waiting on the whole
+// campus — `onChunk` fires with each batch as it arrives, in addition to the final resolved
+// `{ achievement, holders }` covering the complete list once the stream ends. The grouped
+// "All Morocco" view (no campusId) is unchanged: one plain JSON response.
+export const fetchAchievementHolders = async (name, campusId = null, { refresh = false, onChunk } = {}) => {
+  const url =
     `/api/achievements/holders?name=${encodeURIComponent(name)}` +
-      (campusId ? `&campus=${campusId}` : '') +
-      (refresh ? '&refresh=1' : ''),
-  );
+    (campusId ? `&campus=${campusId}` : '') +
+    (refresh ? '&refresh=1' : '');
+
+  if (!campusId) { return request(url); }
+
+  const response = await fetch(url, { credentials: 'same-origin' });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    const err = new Error(data.error || response.statusText);
+    err.status = response.status;
+    throw err;
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let holders = [];
+  let achievement = null;
+
+  const handleLine = (line) => {
+    if (!line) { return; }
+    const msg = JSON.parse(line);
+    if (msg.type === 'chunk') {
+      holders = holders.concat(msg.holders);
+      onChunk?.(msg.holders);
+    } else if (msg.type === 'done') {
+      achievement = msg.achievement;
+    }
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) { break; }
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop();
+    lines.forEach(handleLine);
+  }
+  if (buffer) { handleLine(buffer); }
+
+  return { achievement, holders };
+};
 
 export const fetchAchievedDate = (login, name) =>
   request(`/api/achievements/achieved-date?login=${encodeURIComponent(login)}&name=${encodeURIComponent(name)}`);

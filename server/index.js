@@ -194,13 +194,14 @@ const fetchFullProfile = async (login) => {
   return normalizeFullProfile(user, coalitions);
 };
 
-const fetchAllPages = async (path, { maxPages = 6, pageSize = 100, tokenOverride } = {}) => {
+const fetchAllPages = async (path, { maxPages = 6, pageSize = 100, tokenOverride, onPage } = {}) => {
   const results = [];
   for (let pageNum = 1; pageNum <= maxPages; pageNum += 1) {
     const sep = path.includes('?') ? '&' : '?';
     const { data } = await apiGet(`${path}${sep}page[size]=${pageSize}&page[number]=${pageNum}`, tokenOverride);
     if (!Array.isArray(data) || data.length === 0) { break; }
     results.push(...data);
+    await onPage?.(data);
     if (data.length < pageSize) { break; }
   }
   return results;
@@ -696,6 +697,15 @@ app.get('/api/achievements/holders', requireAuth, async (req, res) => {
     const cacheKey = `${achievement.id}:${requestedCampusId || 'all'}`;
     const cached = !bypassCache && achievementHoldersCache.get(cacheKey);
     if (cached && Date.now() - cached.cachedAt < ACHIEVEMENT_HOLDERS_CACHE_TTL_MS) {
+      if (requestedCampusId) {
+        // Same NDJSON shape as the cold-cache streaming path below, just sent as one chunk —
+        // the client's stream reader doesn't need to know which case it got.
+        res.setHeader('Content-Type', 'application/x-ndjson');
+        res.setHeader('Cache-Control', 'no-cache');
+        res.write(`${JSON.stringify({ type: 'chunk', holders: cached.data.holders })}\n`);
+        res.write(`${JSON.stringify({ type: 'done', achievement })}\n`);
+        return res.end();
+      }
       return res.json({ achievement, ...cached.data });
     }
 
@@ -714,14 +724,32 @@ app.get('/api/achievements/holders', requireAuth, async (req, res) => {
       // Single campus selected — flat list, no grouping needed. Achieved date is NOT
       // fetched here (that would be 1 extra call per holder and make the whole list slow) —
       // it's fetched lazily, only for the one student a card is actually clicked open for.
-      const rawHolders = await fetchAllPages(
+      //
+      // Streamed as newline-delimited JSON: on a cold cache, the raw holder list can take a
+      // few seconds to fetch from 42 (multiple throttled upstream pages) — writing each
+      // upstream page's filtered holders to the response as soon as it arrives lets the
+      // client render the first page-size worth of cards immediately instead of blocking on
+      // the whole campus. A warm cache still just writes one chunk, unchanged from before.
+      res.setHeader('Content-Type', 'application/x-ndjson');
+      res.setHeader('Cache-Control', 'no-cache');
+
+      const rawHolders = [];
+      await fetchAllPages(
         `/achievements/${achievement.id}/users?filter[primary_campus_id]=${requestedCampusId}`,
-        { maxPages: 5 },
+        {
+          maxPages: 5,
+          onPage: (page) => {
+            rawHolders.push(...page);
+            const chunk = filterHolders(page);
+            if (chunk.length > 0) { res.write(`${JSON.stringify({ type: 'chunk', holders: chunk })}\n`); }
+          },
+        },
       );
       const holders = filterHolders(rawHolders);
       const data = { holders };
       achievementHoldersCache.set(cacheKey, { data, cachedAt: Date.now() });
-      return res.json({ achievement, ...data });
+      res.write(`${JSON.stringify({ type: 'done', achievement })}\n`);
+      return res.end();
     }
 
     // "All Morocco": the holder objects carry no campus field at all (verified live), so the

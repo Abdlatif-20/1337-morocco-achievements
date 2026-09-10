@@ -501,8 +501,22 @@ const App = () => {
 
     setAchievementLoading(true);
     setAchievementError(null);
-    setAchievementResult(null);
-    fetchAchievementHolders(DEFAULT_ACHIEVEMENT, campusId || null, { refresh: force })
+    // For a single campus, start from an empty holders list instead of null — the stream's
+    // first chunk (often enough to already cover the selected page size) then appends onto
+    // it live, so the grid can render before the whole campus has finished loading.
+    setAchievementResult(campusId ? { holders: [] } : null);
+    fetchAchievementHolders(DEFAULT_ACHIEVEMENT, campusId || null, {
+      refresh: force,
+      onChunk: campusId
+        ? (chunk) => {
+            if (latestHoldersKeyRef.current !== key) { return; }
+            setAchievementResult((prev) => ({
+              ...(prev || { holders: [] }),
+              holders: [...(prev?.holders || []), ...chunk],
+            }));
+          }
+        : undefined,
+    })
       .then((res) => {
         setCache((prev) => ({ ...prev, [key]: res }));
         if (latestHoldersKeyRef.current !== key) { return; }
@@ -564,6 +578,15 @@ const App = () => {
 
   const withRecentParisFlag = (campusId, holders) =>
     holders.map((h) => ({ ...h, recentParisMove: Boolean(getRecentParisJoin(campusId, h.login)) }));
+
+  // 42's filter[primary_campus_id] can lag right after a primary-campus flip — a student who
+  // just switched to Paris can still show up under their old campus's holders list for a
+  // while, duplicating them against the "Recently switched to 42 Paris" section below. Drop
+  // anyone already accounted for there, since we already have that data loaded.
+  const excludeSwitchers = (campusId, holders) => {
+    const switcherLogins = new Set(switchers.filter((s) => s.campusId === campusId).map((s) => s.login));
+    return holders.filter((h) => !switcherLogins.has(h.login));
+  };
 
   // The achieved date is fetched lazily here, only for the one student actually opened —
   // not for every card in the list (that was an earlier slowdown).
@@ -663,7 +686,7 @@ const App = () => {
 
       {achievementError && <p className="error-text">{achievementError}</p>}
 
-      {achievementLoading ? (
+      {achievementLoading && !achievementResult?.holders?.length && !achievementResult?.groups ? (
         <div className="inline-loading">
           <span className="spinner" />
           Looking up the achievement and its holders…
@@ -671,6 +694,12 @@ const App = () => {
       ) : (
         achievementResult && (
           <>
+            {achievementLoading && achievementResult.holders && (
+              <div className="inline-loading">
+                <span className="spinner" />
+                Loading more students…
+              </div>
+            )}
             {switchersOnly ? (
               // Toggle is on: skip the normal holders/Paris-adders view entirely and show
               // only the "recently switched" section(s) — same underlying data, already
@@ -756,7 +785,7 @@ const App = () => {
                   ) : (
                     <PaginatedStudentGrid
                       key={g.campus.id}
-                      students={withRecentParisFlag(g.campus.id, g.holders)}
+                      students={withRecentParisFlag(g.campus.id, excludeSwitchers(g.campus.id, g.holders))}
                       onOpenStudent={openHolderDetail}
                       globalPromoFilter={globalPromoFilter}
                       globalPageSize={globalPageSize}
@@ -785,12 +814,15 @@ const App = () => {
                 ) : (
                   <>
                     <p className="status-text">
-                      {achievementResult.holders.length} student(s) at{' '}
+                      {excludeSwitchers(Number(selectedCampusId), achievementResult.holders).length} student(s) at{' '}
                       {campuses.find((c) => String(c.id) === selectedCampusId)?.name}
                     </p>
                     <PaginatedStudentGrid
                       key={selectedCampusId}
-                      students={withRecentParisFlag(Number(selectedCampusId), achievementResult.holders)}
+                      students={withRecentParisFlag(
+                        Number(selectedCampusId),
+                        excludeSwitchers(Number(selectedCampusId), achievementResult.holders),
+                      )}
                       onOpenStudent={openHolderDetail}
                     />
                   </>
