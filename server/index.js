@@ -114,10 +114,28 @@ const normalizeFullProfile = (data, coalitions) => {
     data.cursus_users?.[0] ||
     null;
 
-  const primaryCampusId = data.campus_users?.find((cu) => cu.is_primary)?.campus_id;
+  // 42's API can return more than one campus_users row flagged is_primary (stale flip not
+  // fully propagated) — the one that actually reflects reality is whichever was touched most
+  // recently, not whichever happens to sit first in the array.
+  const primaryCampusId = data.campus_users
+    ?.filter((cu) => cu.is_primary)
+    ?.sort((a, b) => new Date(b.updated_at || b.created_at || 0) - new Date(a.updated_at || a.created_at || 0))
+    ?.[0]?.campus_id;
   const primaryCampus =
     data.campus?.find((c) => c.id === primaryCampusId) ||
     data.campus?.[0] ||
+    null;
+
+  // A student can carry coalitions from more than one campus (after a transfer, both the old
+  // and new campus's coalition show up) — /v2/users/:login/coalitions ignores filter[campus_id]
+  // and just returns all of them, so coalitions[0] isn't reliably the CURRENT one. Each
+  // coalition's slug embeds its campus name (e.g. "42cursus-paris-the-federation" vs
+  // "42cursus-khouribga-philantropists"), so match against the current primary campus's name
+  // instead of trusting array order.
+  const primaryCampusNameSlug = primaryCampus?.name?.toLowerCase().replace(/\s+/g, '-');
+  const currentCoalition =
+    (primaryCampusNameSlug && coalitions.find((c) => c.slug?.toLowerCase().includes(primaryCampusNameSlug))) ||
+    coalitions[0] ||
     null;
 
   const skills = (mainCursus?.skills ?? [])
@@ -160,8 +178,8 @@ const normalizeFullProfile = (data, coalitions) => {
     campuses,
     level: mainCursus?.level ?? 0,
     grade: mainCursus?.grade || null,
-    coalitionColor: coalitions[0]?.color || null,
-    coalitionName: coalitions[0]?.name || null,
+    coalitionColor: currentCoalition?.color || null,
+    coalitionName: currentCoalition?.name || null,
     skills,
     projects,
   };
