@@ -28,6 +28,48 @@ const PARIS_CACHE_TTL_MS = 60 * 60 * 1000;
 // Tétouan (55) and Rabat (75) have never had a holder of this achievement — searching for it
 // there is a guaranteed-empty API call. Skip straight to the Paris-on-profile check instead.
 const NO_ACHIEVEMENT_CAMPUS_IDS = [55, 75];
+const RABAT_CAMPUS_ID = 75;
+
+// Shimmering student-card-shaped placeholders shown while a list is loading, instead of a
+// plain spinner — gives an idea of the shape of what's coming instead of a blank wait.
+const SkeletonCard = () => (
+  <div className="student-card skeleton-card">
+    <div className="skeleton-avatar" />
+    <div className="student-info">
+      <div className="skeleton-line skeleton-line-wide" />
+      <div className="skeleton-line skeleton-line-narrow" />
+    </div>
+  </div>
+);
+
+const SkeletonGrid = ({ count = 6 }) => (
+  <div className="student-grid">
+    {Array.from({ length: count }, (_, i) => <SkeletonCard key={i} />)}
+  </div>
+);
+
+// Defers actually mounting a StudentCard until it's about to scroll into view — shows the
+// same skeleton placeholder in its place until then. `rootMargin` starts the swap a bit
+// before the card is actually visible so it's ready by the time scrolling reaches it. Once
+// shown, stays mounted (observer disconnects) — no point re-hiding a card the user already saw.
+const LazyCard = ({ student, onOpen }) => {
+  const ref = useRef(null);
+  const [visible, setVisible] = useState(false);
+
+  useEffect(() => {
+    if (visible || !ref.current) { return; }
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting) { setVisible(true); }
+      },
+      { rootMargin: '200px' },
+    );
+    observer.observe(ref.current);
+    return () => observer.disconnect();
+  }, [visible]);
+
+  return <div ref={ref}>{visible ? <StudentCard student={student} onOpen={onOpen} /> : <SkeletonCard />}</div>;
+};
 
 // For any campus with real holders shown, the Paris-adders scan (same one Tétouan/Rabat's
 // fallback view uses, GET /api/campuses/:id/paris-adders) is fetched quietly in the
@@ -111,7 +153,7 @@ const PaginatedStudentGrid = ({ students, onOpenStudent, globalPromoFilter, glob
       ) : (
         <div className="student-grid">
           {pageStudents.map((s) => (
-            <StudentCard key={s.id} student={s} onOpen={() => onOpenStudent(s)} />
+            <LazyCard key={s.id} student={s} onOpen={() => onOpenStudent(s)} />
           ))}
         </div>
       )}
@@ -276,10 +318,10 @@ const ParisAddersSection = ({ campusId, campusName, showCount = true, cached, lo
   const adders = cached?.adders || [];
   if (loading && adders.length === 0) {
     return (
-      <div className="inline-loading">
-        <span className="spinner" />
-        No achievement holders here — checking who has 42 Paris on their profile…
-      </div>
+      <>
+        <p className="status-text">No achievement holders here — checking who has 42 Paris on their profile…</p>
+        <SkeletonGrid />
+      </>
     );
   }
   if (adders.length === 0) {
@@ -318,13 +360,16 @@ const ParisAddersSection = ({ campusId, campusName, showCount = true, cached, lo
 // campus is now Paris) but who genuinely made that switch recently. The parent already
 // triggers the background Paris-adders fetch this reads from (same one powering the ✈️
 // badge), so this never fires its own network request.
-const RecentParisSwitchersSection = ({ students, loading, onOpenStudent }) => {
-  if (loading && students.length === 0) {
+const RecentParisSwitchersSection = ({ students, loading, campusId, onOpenStudent }) => {
+  // Rabat has zero students full stop, verified live (see server/index.js) — no point
+  // showing a "checking…" spinner for a campus that structurally can never have a switcher.
+  const effectiveLoading = campusId === RABAT_CAMPUS_ID ? false : loading;
+  if (effectiveLoading && students.length === 0) {
     return (
-      <div className="inline-loading">
-        <span className="spinner" />
-        Checking for students who recently switched to 42 Paris…
-      </div>
+      <>
+        <p className="status-text">Checking for students who recently switched to 42 Paris…</p>
+        <SkeletonGrid count={3} />
+      </>
     );
   }
   const sorted = [...students].sort((a, b) => a.displayName.localeCompare(b.displayName));
@@ -338,7 +383,7 @@ const RecentParisSwitchersSection = ({ students, loading, onOpenStudent }) => {
       ) : (
         <div className="student-grid">
           {sorted.map((s) => (
-            <StudentCard key={s.id} student={s} onOpen={() => onOpenStudent(s)} />
+            <LazyCard key={s.id} student={s} onOpen={() => onOpenStudent(s)} />
           ))}
         </div>
       )}
@@ -375,16 +420,34 @@ const App = () => {
   // "✈️ Recently switched to 42 Paris" section(s) — the underlying data is already fetched
   // either way, this is purely a display filter.
   const [switchersOnly, setSwitchersOnly] = useState(false);
-  // Only meaningful in the "All Morocco" (grouped) view — one Promo filter and page size
-  // shared by every campus group instead of each group having its own. Reset whenever the
-  // campus selection changes so neither carries a stale value into a freshly picked
-  // single-campus view.
-  const [globalPromoFilter, setGlobalPromoFilter] = useState('');
+  // Only meaningful in the "All Morocco" (grouped) view — one page size shared by every
+  // campus group instead of each group having its own (Prev/Next stay per-campus though —
+  // see `groupPages`). No Promo filter here anymore: filtering by promo year needs seeing a
+  // campus's whole holder list to know which years even exist, which defeats the point of
+  // backend pagination (only fetching the page actually requested).
   const [globalPageSize, setGlobalPageSize] = useState(PAGE_SIZE_OPTIONS[0]);
-  useEffect(() => { setGlobalPromoFilter(''); setGlobalPageSize(PAGE_SIZE_OPTIONS[0]); }, [selectedCampusId]);
+  useEffect(() => { setGlobalPageSize(PAGE_SIZE_OPTIONS[0]); }, [selectedCampusId]);
   const [achievementResult, setAchievementResult] = useState(null);
   const [achievementError, setAchievementError] = useState(null);
   const [achievementLoading, setAchievementLoading] = useState(false);
+  // Single-campus holders are paginated server-side (see server/index.js) — only this page's
+  // worth ever gets fetched/held client-side. Reset to page 1 whenever the campus or page
+  // size changes, so neither carries a stale page number into a fresh selection.
+  const [holdersPage, setHoldersPage] = useState(1);
+  const [holdersPageSize, setHoldersPageSize] = useState(PAGE_SIZE_OPTIONS[0]);
+  useEffect(() => { setHoldersPage(1); }, [selectedCampusId, holdersPageSize]);
+
+  // "All Morocco" is now ALSO backend-paginated: instead of one big request that fetches
+  // every campus's full holder list, each campus group is fetched independently through the
+  // same paginated single-campus endpoint, one page at a time — reusing `globalPageSize` as
+  // the shared "Show" control, but each group keeps its OWN page number so Prev/Next on one
+  // campus doesn't touch the others (matches the old client-side-slicing behavior, where each
+  // group's PaginatedStudentGrid instance paginated independently).
+  const [groupPages, setGroupPages] = useState({}); // campusId -> page
+  const [groupResults, setGroupResults] = useState({}); // campusId -> { holders, hasMore, page }
+  const [groupLoading, setGroupLoading] = useState({}); // campusId -> bool
+  const anyGroupLoading = Object.values(groupLoading).some(Boolean);
+  useEffect(() => { setGroupPages({}); }, [selectedCampusId, globalPageSize]);
   const [refreshUses, setRefreshUses] = useState(() => getRecentUses(REFRESH_USE_KEY, REFRESH_WINDOW_MS));
   const refreshesLeft = Math.max(0, REFRESH_LIMIT - refreshUses.length);
   // Keyed by campus id ('' = All Morocco) — switching back to an already-fetched campus
@@ -489,8 +552,8 @@ const App = () => {
   // response matching the most recently *started* request is ever applied.
   const latestHoldersKeyRef = useRef(null);
 
-  const loadHolders = (campusId, { force = false } = {}) => {
-    const key = campusId || '';
+  const loadHolders = (campusId, { force = false, page = holdersPage, pageSize = holdersPageSize } = {}) => {
+    const key = `${campusId}:${page}:${pageSize}`;
     latestHoldersKeyRef.current = key;
 
     if (!force && cache[key]) {
@@ -501,22 +564,7 @@ const App = () => {
 
     setAchievementLoading(true);
     setAchievementError(null);
-    // For a single campus, start from an empty holders list instead of null — the stream's
-    // first chunk (often enough to already cover the selected page size) then appends onto
-    // it live, so the grid can render before the whole campus has finished loading.
-    setAchievementResult(campusId ? { holders: [] } : null);
-    fetchAchievementHolders(DEFAULT_ACHIEVEMENT, campusId || null, {
-      refresh: force,
-      onChunk: campusId
-        ? (chunk) => {
-            if (latestHoldersKeyRef.current !== key) { return; }
-            setAchievementResult((prev) => ({
-              ...(prev || { holders: [] }),
-              holders: [...(prev?.holders || []), ...chunk],
-            }));
-          }
-        : undefined,
-    })
+    fetchAchievementHolders(DEFAULT_ACHIEVEMENT, campusId, { refresh: force, page, pageSize })
       .then((res) => {
         setCache((prev) => ({ ...prev, [key]: res }));
         if (latestHoldersKeyRef.current !== key) { return; }
@@ -537,10 +585,39 @@ const App = () => {
       });
   };
 
+  // "All Morocco": each campus group is its own independent paginated fetch through the same
+  // endpoint used for a single selected campus — see the `groupPages`/`groupResults` state
+  // above for why.
+  const loadGroupCampus = (campusId, { force = false, page } = {}) => {
+    const p = page ?? groupPages[campusId] ?? 1;
+    const key = `${campusId}:${p}:${globalPageSize}`;
+
+    if (!force && cache[key]) {
+      setGroupResults((prev) => ({ ...prev, [campusId]: cache[key] }));
+      return;
+    }
+
+    setGroupLoading((prev) => ({ ...prev, [campusId]: true }));
+    fetchAchievementHolders(DEFAULT_ACHIEVEMENT, campusId, { refresh: force, page: p, pageSize: globalPageSize })
+      .then((res) => {
+        setCache((prev) => ({ ...prev, [key]: res }));
+        setGroupResults((prev) => ({ ...prev, [campusId]: res }));
+      })
+      .catch((err) => {
+        if (err.status === 401) { setMe(null); }
+      })
+      .finally(() => setGroupLoading((prev) => ({ ...prev, [campusId]: false })));
+  };
+
   useEffect(() => {
-    if (!me) { return; }
-    loadHolders(selectedCampusId);
-  }, [me, selectedCampusId]);
+    if (!me || !selectedCampusId) { return; }
+    loadHolders(selectedCampusId, { page: holdersPage, pageSize: holdersPageSize });
+  }, [me, selectedCampusId, holdersPage, holdersPageSize]);
+
+  useEffect(() => {
+    if (!me || selectedCampusId || campuses.length === 0) { return; }
+    campuses.forEach((c) => loadGroupCampus(c.id, { page: 1 }));
+  }, [me, selectedCampusId, globalPageSize, campuses]);
 
   // Whenever the holders list resolves and it includes Khouribga/Benguerir with real
   // holders, quietly kick off (or reuse the cache of) the per-campus raw Paris-adders scan
@@ -551,21 +628,27 @@ const App = () => {
     // Which campuses actually have holders shown right now changes over time (Tétouan, once
     // always empty, now genuinely has some) — so this runs for any campus with holders,
     // not a fixed hardcoded pair.
-    const campusIdsWithHolders = achievementResult.groups
-      ? achievementResult.groups.filter((g) => g.holders.length > 0).map((g) => g.campus.id)
-      : achievementResult.holders?.length > 0 && selectedCampusId
-        ? [Number(selectedCampusId)]
-        : [];
-    campusIdsWithHolders.forEach((id) => loadParisAdders(id));
+    if (achievementResult.holders?.length > 0 && selectedCampusId) {
+      loadParisAdders(Number(selectedCampusId));
+    }
   }, [achievementResult]);
+
+  // Same as above, but for "All Morocco" — one campus's group resolving with holders
+  // triggers that campus's own Paris-adders scan.
+  useEffect(() => {
+    if (selectedCampusId) { return; }
+    Object.entries(groupResults).forEach(([campusId, res]) => {
+      if (res?.holders?.length > 0) { loadParisAdders(Number(campusId)); }
+    });
+  }, [groupResults, selectedCampusId]);
 
   // The achievement-gated switchers list is one shared fetch (not per campus) — triggered
   // once whenever there's a holders result to show it alongside, regardless of which
   // Moroccan campus(es) that result covers.
   useEffect(() => {
-    if (!achievementResult) { return; }
+    if (!achievementResult && Object.keys(groupResults).length === 0) { return; }
     loadParisSwitchers();
-  }, [achievementResult]);
+  }, [achievementResult, groupResults]);
 
   // null when the student isn't a recent Paris-adder for this campus, otherwise the date
   // Paris was added to their profile — recency is judged against RECENT_PARIS_MOVE_MS.
@@ -673,168 +756,205 @@ const App = () => {
           onClick={() => {
             if (refreshesLeft <= 0) { return; }
             setRefreshUses(recordUse(REFRESH_USE_KEY, REFRESH_WINDOW_MS));
-            loadHolders(selectedCampusId, { force: true });
-            if (selectedCampusId && NO_ACHIEVEMENT_CAMPUS_IDS.includes(Number(selectedCampusId))) {
-              loadParisAdders(Number(selectedCampusId), { force: true });
-            } else if (!selectedCampusId) {
+            if (selectedCampusId) {
+              loadHolders(selectedCampusId, { force: true, page: holdersPage, pageSize: holdersPageSize });
+              if (NO_ACHIEVEMENT_CAMPUS_IDS.includes(Number(selectedCampusId))) {
+                loadParisAdders(Number(selectedCampusId), { force: true });
+              }
+            } else {
+              campuses.forEach((c) => loadGroupCampus(c.id, { force: true, page: groupPages[c.id] ?? 1 }));
               NO_ACHIEVEMENT_CAMPUS_IDS.forEach((id) => loadParisAdders(id, { force: true }));
             }
           }}
-          disabled={achievementLoading || refreshesLeft <= 0}
+          disabled={(selectedCampusId ? achievementLoading : anyGroupLoading) || refreshesLeft <= 0}
           title={refreshesLeft <= 0 ? 'Refresh limit reached — try again in a bit' : `${refreshesLeft} refresh(es) left this hour`}
         >
-          {achievementLoading ? 'Loading…' : refreshesLeft <= 0 ? 'Limit reached' : `Refresh (${refreshesLeft})`}
+          {(selectedCampusId ? achievementLoading : anyGroupLoading) ? 'Loading…' : refreshesLeft <= 0 ? 'Limit reached' : `Refresh (${refreshesLeft})`}
         </button>
       </div>
 
       {achievementError && <p className="error-text">{achievementError}</p>}
 
-      {achievementLoading && !achievementResult?.holders?.length && !achievementResult?.groups ? (
-        <div className="inline-loading">
-          <span className="spinner" />
-          Looking up the achievement and its holders…
-        </div>
-      ) : (
-        achievementResult && (
+      {selectedCampusId ? (
+        achievementLoading && !achievementResult?.holders?.length ? (
           <>
-            {achievementLoading && achievementResult.holders && (
-              <div className="inline-loading">
-                <span className="spinner" />
-                Loading more students…
-              </div>
-            )}
-            {switchersOnly ? (
-              // Toggle is on: skip the normal holders/Paris-adders view entirely and show
-              // only the "recently switched" section(s) — same underlying data, already
-              // fetched either way, just a display filter.
-              achievementResult.groups ? (
-                achievementResult.groups.map((g) => (
-                  <div key={g.campus.id} className="campus-group">
-                    <h2 className="section-heading">{g.campus.name}</h2>
-                    <RecentParisSwitchersSection
-                      students={switchers.filter((s) => s.campusId === g.campus.id)}
-                      loading={switchersLoading}
-                      onOpenStudent={openHolderDetail}
-                    />
-                  </div>
-                ))
-              ) : (
+            <p className="status-text">Looking up the achievement and its holders…</p>
+            <SkeletonGrid />
+          </>
+        ) : (
+          achievementResult && (
+            <>
+              {achievementLoading && achievementResult.holders && (
+                <div className="inline-loading">
+                  <span className="spinner" />
+                  Loading…
+                </div>
+              )}
+              {switchersOnly ? (
+                // Toggle is on: skip the normal holders/Paris-adders view entirely and show
+                // only the "recently switched" section(s) — same underlying data, already
+                // fetched either way, just a display filter.
                 <RecentParisSwitchersSection
                   students={switchers.filter((s) => s.campusId === Number(selectedCampusId))}
                   loading={switchersLoading}
+                  campusId={Number(selectedCampusId)}
                   onOpenStudent={openHolderDetail}
                 />
-              )
-            ) : achievementResult.groups ? (
-              <>
-                {achievementResult.groups.every((g) => g.holders.length > 0 || parisCache[g.campus.id]?.ready) && (
-                  <p className="status-text total-count">
-                    {achievementResult.groups.reduce(
-                      (sum, g) => sum + (g.holders.length > 0 ? g.holders.length : (parisCache[g.campus.id]?.adders.length ?? 0)),
-                      0,
-                    )} student(s) total across all campuses
-                  </p>
-                )}
-                {(() => {
-                  // One Show (page size) and Promo control shared across every campus group,
-                  // instead of each group needing its own — Promo options built from the
-                  // union of promo years across every group's list (achievement holders
-                  // where present, Paris-adders otherwise).
-                  const allPromoYears = [...new Set(
-                    achievementResult.groups.flatMap((g) =>
-                      (g.holders.length > 0 ? g.holders : parisCache[g.campus.id]?.adders || [])
-                        .map((s) => s.poolYear)
-                        .filter(Boolean),
-                    ),
-                  )].sort().reverse();
-                  return (
-                    <div className="filters-row grid-controls">
-                      <Dropdown
-                        label="Show"
-                        value={globalPageSize}
-                        options={PAGE_SIZE_OPTIONS.map((n) => ({ value: n, label: String(n) }))}
-                        onChange={(v) => setGlobalPageSize(Number(v))}
-                      />
-                      {allPromoYears.length > 0 && (
-                        <Dropdown
-                          label="Promo"
-                          value={globalPromoFilter}
-                          options={[{ value: '', label: 'All' }, ...allPromoYears.map((y) => ({ value: y, label: String(y) }))]}
-                          onChange={setGlobalPromoFilter}
-                        />
-                      )}
-                    </div>
-                  );
-                })()}
-                {/* "All Morocco": one section per campus, holders never mixed together. */}
-                {achievementResult.groups.map((g) => (
-                <div key={g.campus.id} className="campus-group">
-                  <h2 className="section-heading">
-                    {g.campus.name} ({g.holders.length > 0 ? g.holders.length : (parisCache[g.campus.id]?.adders.length ?? 0)})
-                  </h2>
-                  {g.holders.length === 0 ? (
+              ) : (
+                <>
+                  {achievementResult.page === 1 && achievementResult.holders.length === 0 ? (
                     <ParisAddersSection
-                      campusId={g.campus.id}
-                      campusName={g.campus.name}
-                      showCount={false}
-                      cached={parisCache[g.campus.id]}
-                      loading={Boolean(parisLoading[g.campus.id])}
-                      error={parisError[g.campus.id]}
+                      campusId={Number(selectedCampusId)}
+                      campusName={campuses.find((c) => String(c.id) === selectedCampusId)?.name}
+                      cached={parisCache[Number(selectedCampusId)]}
+                      loading={Boolean(parisLoading[Number(selectedCampusId)])}
+                      error={parisError[Number(selectedCampusId)]}
                       onLoad={loadParisAdders}
                       onOpenStudent={openHolderDetail}
-                      globalPromoFilter={globalPromoFilter}
-                      globalPageSize={globalPageSize}
                     />
                   ) : (
-                    <PaginatedStudentGrid
-                      key={g.campus.id}
-                      students={withRecentParisFlag(g.campus.id, excludeSwitchers(g.campus.id, g.holders))}
-                      onOpenStudent={openHolderDetail}
-                      globalPromoFilter={globalPromoFilter}
-                      globalPageSize={globalPageSize}
-                    />
+                    <>
+                      <div className="filters-row grid-controls">
+                        <Dropdown
+                          label="Show"
+                          value={holdersPageSize}
+                          options={PAGE_SIZE_OPTIONS.map((n) => ({ value: n, label: String(n) }))}
+                          onChange={(v) => setHoldersPageSize(Number(v))}
+                        />
+                      </div>
+                      <p className="status-text">
+                        Page {achievementResult.page} at{' '}
+                        {campuses.find((c) => String(c.id) === selectedCampusId)?.name}
+                      </p>
+                      <div className="student-grid">
+                        {withRecentParisFlag(
+                          Number(selectedCampusId),
+                          excludeSwitchers(Number(selectedCampusId), achievementResult.holders),
+                        ).map((s) => (
+                          <LazyCard key={s.id} student={s} onOpen={() => openHolderDetail(s)} />
+                        ))}
+                      </div>
+                      <div className="pagination">
+                        <button
+                          type="button"
+                          onClick={() => setHoldersPage((p) => Math.max(1, p - 1))}
+                          disabled={holdersPage === 1 || achievementLoading}
+                        >
+                          ← Prev
+                        </button>
+                        <span>Page {holdersPage}</span>
+                        <button
+                          type="button"
+                          onClick={() => setHoldersPage((p) => p + 1)}
+                          disabled={!achievementResult.hasMore || achievementLoading}
+                        >
+                          Next →
+                        </button>
+                      </div>
+                    </>
                   )}
                   <RecentParisSwitchersSection
-                    students={switchers.filter((s) => s.campusId === g.campus.id)}
+                    students={switchers.filter((s) => s.campusId === Number(selectedCampusId))}
                     loading={switchersLoading}
+                    campusId={Number(selectedCampusId)}
+                    onOpenStudent={openHolderDetail}
+                  />
+                </>
+              )}
+            </>
+          )
+        )
+      ) : (
+        campuses.length > 0 && (
+          <>
+            {switchersOnly ? (
+              campuses.map((c) => (
+                <div key={c.id} className="campus-group">
+                  <h2 className="section-heading">{c.name}</h2>
+                  <RecentParisSwitchersSection
+                    students={switchers.filter((s) => s.campusId === c.id)}
+                    loading={switchersLoading}
+                    campusId={c.id}
                     onOpenStudent={openHolderDetail}
                   />
                 </div>
-                ))}
-              </>
+              ))
             ) : (
               <>
-                {achievementResult.holders.length === 0 ? (
-                  <ParisAddersSection
-                    campusId={Number(selectedCampusId)}
-                    campusName={campuses.find((c) => String(c.id) === selectedCampusId)?.name}
-                    cached={parisCache[Number(selectedCampusId)]}
-                    loading={Boolean(parisLoading[Number(selectedCampusId)])}
-                    error={parisError[Number(selectedCampusId)]}
-                    onLoad={loadParisAdders}
-                    onOpenStudent={openHolderDetail}
+                <div className="filters-row grid-controls">
+                  <Dropdown
+                    label="Show"
+                    value={globalPageSize}
+                    options={PAGE_SIZE_OPTIONS.map((n) => ({ value: n, label: String(n) }))}
+                    onChange={(v) => setGlobalPageSize(Number(v))}
                   />
-                ) : (
-                  <>
-                    <p className="status-text">
-                      {excludeSwitchers(Number(selectedCampusId), achievementResult.holders).length} student(s) at{' '}
-                      {campuses.find((c) => String(c.id) === selectedCampusId)?.name}
-                    </p>
-                    <PaginatedStudentGrid
-                      key={selectedCampusId}
-                      students={withRecentParisFlag(
-                        Number(selectedCampusId),
-                        excludeSwitchers(Number(selectedCampusId), achievementResult.holders),
+                </div>
+                {/* "All Morocco": one section per campus, each independently paginated
+                    through the same backend-paginated endpoint as a single selected campus. */}
+                {campuses.map((c) => {
+                  const res = groupResults[c.id];
+                  const loading = Boolean(groupLoading[c.id]);
+                  const page = groupPages[c.id] ?? 1;
+                  const holders = res?.holders || [];
+                  return (
+                    <div key={c.id} className="campus-group">
+                      <h2 className="section-heading">{c.name}</h2>
+                      {loading && holders.length === 0 ? (
+                        <SkeletonGrid />
+                      ) : page === 1 && holders.length === 0 ? (
+                        <ParisAddersSection
+                          campusId={c.id}
+                          campusName={c.name}
+                          showCount={false}
+                          cached={parisCache[c.id]}
+                          loading={Boolean(parisLoading[c.id])}
+                          error={parisError[c.id]}
+                          onLoad={loadParisAdders}
+                          onOpenStudent={openHolderDetail}
+                        />
+                      ) : (
+                        <>
+                          <div className="student-grid">
+                            {withRecentParisFlag(c.id, excludeSwitchers(c.id, holders)).map((s) => (
+                              <LazyCard key={s.id} student={s} onOpen={() => openHolderDetail(s)} />
+                            ))}
+                          </div>
+                          <div className="pagination">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const nextPage = Math.max(1, page - 1);
+                                setGroupPages((prev) => ({ ...prev, [c.id]: nextPage }));
+                                loadGroupCampus(c.id, { page: nextPage });
+                              }}
+                              disabled={page === 1 || loading}
+                            >
+                              ← Prev
+                            </button>
+                            <span>Page {page}</span>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const nextPage = page + 1;
+                                setGroupPages((prev) => ({ ...prev, [c.id]: nextPage }));
+                                loadGroupCampus(c.id, { page: nextPage });
+                              }}
+                              disabled={!res?.hasMore || loading}
+                            >
+                              Next →
+                            </button>
+                          </div>
+                        </>
                       )}
-                      onOpenStudent={openHolderDetail}
-                    />
-                  </>
-                )}
-                <RecentParisSwitchersSection
-                  students={switchers.filter((s) => s.campusId === Number(selectedCampusId))}
-                  loading={switchersLoading}
-                  onOpenStudent={openHolderDetail}
-                />
+                      <RecentParisSwitchersSection
+                        students={switchers.filter((s) => s.campusId === c.id)}
+                        loading={switchersLoading}
+                        campusId={c.id}
+                        onOpenStudent={openHolderDetail}
+                      />
+                    </div>
+                  );
+                })}
               </>
             )}
           </>

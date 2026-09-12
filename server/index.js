@@ -194,14 +194,13 @@ const fetchFullProfile = async (login) => {
   return normalizeFullProfile(user, coalitions);
 };
 
-const fetchAllPages = async (path, { maxPages = 6, pageSize = 100, tokenOverride, onPage } = {}) => {
+const fetchAllPages = async (path, { maxPages = 6, pageSize = 100, tokenOverride } = {}) => {
   const results = [];
   for (let pageNum = 1; pageNum <= maxPages; pageNum += 1) {
     const sep = path.includes('?') ? '&' : '?';
     const { data } = await apiGet(`${path}${sep}page[size]=${pageSize}&page[number]=${pageNum}`, tokenOverride);
     if (!Array.isArray(data) || data.length === 0) { break; }
     results.push(...data);
-    await onPage?.(data);
     if (data.length < pageSize) { break; }
   }
   return results;
@@ -600,6 +599,22 @@ app.get('/api/auth/callback', async (req, res) => {
     const expiresAt = Date.now() + (tokenData.expires_in || 7200) * 1000;
 
     const me = await fetchMe(accessToken);
+
+    // Same stale-flip issue as normalizeFullProfile above: 42 can flag more than one
+    // campus_users row is_primary, so pick the one touched most recently instead of
+    // whichever sits first. If that campus isn't one of the 4 this app covers (e.g. a
+    // student who's since switched their primary to Paris), fall back to whichever OTHER
+    // campus on their profile IS one of ours, so the dropdown still defaults to something
+    // useful instead of silently landing on "All Morocco".
+    const campusUsers = me.campus_users || [];
+    const primaryCampusId = campusUsers
+      .filter((cu) => cu.is_primary)
+      .sort((a, b) => new Date(b.updated_at || b.created_at || 0) - new Date(a.updated_at || a.created_at || 0))
+      [0]?.campus_id ?? null;
+    const defaultCampusId = MOROCCAN_CAMPUSES.some((c) => c.id === primaryCampusId)
+      ? primaryCampusId
+      : campusUsers.find((cu) => MOROCCAN_CAMPUSES.some((c) => c.id === cu.campus_id))?.campus_id ?? primaryCampusId;
+
     const user = {
       id: me.id,
       login: me.login,
@@ -608,7 +623,7 @@ app.get('/api/auth/callback', async (req, res) => {
       // Captured once at login so the client can default the campus dropdown to the
       // visitor's own campus instead of "All Morocco" — not refreshed on token refresh
       // since a student's home campus essentially never changes mid-session.
-      primaryCampusId: me.campus_users?.find((cu) => cu.is_primary)?.campus_id ?? null,
+      primaryCampusId: defaultCampusId,
     };
 
     setSessionCookie(res, { accessToken, refreshToken, expiresAt, user });
@@ -693,19 +708,6 @@ app.get('/api/achievements/holders', requireAuth, async (req, res) => {
 
     const bypassCache = req.query.refresh === '1';
     const cacheKey = `${achievement.id}:${requestedCampusId || 'all'}`;
-    const cached = !bypassCache && achievementHoldersCache.get(cacheKey);
-    if (cached && Date.now() - cached.cachedAt < ACHIEVEMENT_HOLDERS_CACHE_TTL_MS) {
-      if (requestedCampusId) {
-        // Same NDJSON shape as the cold-cache streaming path below, just sent as one chunk —
-        // the client's stream reader doesn't need to know which case it got.
-        res.setHeader('Content-Type', 'application/x-ndjson');
-        res.setHeader('Cache-Control', 'no-cache');
-        res.write(`${JSON.stringify({ type: 'chunk', holders: cached.data.holders })}\n`);
-        res.write(`${JSON.stringify({ type: 'done', achievement })}\n`);
-        return res.end();
-      }
-      return res.json({ achievement, ...cached.data });
-    }
 
     // Both filters below cost no per-holder calls: staff exclusion reads fields already on
     // the raw holder object, and the year filter is one shared, paginated lookup reused
@@ -723,36 +725,56 @@ app.get('/api/achievements/holders', requireAuth, async (req, res) => {
       // fetched here (that would be 1 extra call per holder and make the whole list slow) —
       // it's fetched lazily, only for the one student a card is actually clicked open for.
       //
-      // Streamed as newline-delimited JSON: on a cold cache, the raw holder list can take a
-      // few seconds to fetch from 42 (multiple throttled upstream pages) — writing each
-      // upstream page's filtered holders to the response as soon as it arrives lets the
-      // client render the first page-size worth of cards immediately instead of blocking on
-      // the whole campus. A warm cache still just writes one chunk, unchanged from before.
-      res.setHeader('Content-Type', 'application/x-ndjson');
-      res.setHeader('Cache-Control', 'no-cache');
+      // Real backend pagination: only as many upstream pages get fetched from 42 as are
+      // needed to cover the requested page — page 1 at the default size usually needs just
+      // one upstream page of 100 raw holders, not all of them. The cache entry holds
+      // whatever's been fetched SO FAR (raw holders + how many upstream pages consumed),
+      // and a later request for a deeper page/larger size just fetches the additional
+      // upstream pages needed and extends it, instead of restarting from zero.
+      const page = Math.max(1, Number(req.query.page) || 1);
+      const pageSize = Math.max(1, Number(req.query.pageSize) || 10);
+      const neededCount = page * pageSize;
 
-      const rawHolders = [];
-      await fetchAllPages(
-        `/achievements/${achievement.id}/users?filter[primary_campus_id]=${requestedCampusId}`,
-        {
-          maxPages: 5,
-          onPage: (page) => {
-            rawHolders.push(...page);
-            const chunk = filterHolders(page);
-            if (chunk.length > 0) { res.write(`${JSON.stringify({ type: 'chunk', holders: chunk })}\n`); }
-          },
-        },
-      );
-      const holders = filterHolders(rawHolders);
-      const data = { holders };
-      achievementHoldersCache.set(cacheKey, { data, cachedAt: Date.now() });
-      res.write(`${JSON.stringify({ type: 'done', achievement })}\n`);
-      return res.end();
+      let entry = !bypassCache && achievementHoldersCache.get(cacheKey);
+      if (!entry || Date.now() - entry.cachedAt >= ACHIEVEMENT_HOLDERS_CACHE_TTL_MS) {
+        entry = { rawHolders: [], upstreamPage: 0, exhausted: false, cachedAt: Date.now() };
+      }
+
+      const upstreamMaxPages = 5; // same ceiling as before (500 raw holders per campus)
+      while (
+        filterHolders(entry.rawHolders).length < neededCount &&
+        !entry.exhausted &&
+        entry.upstreamPage < upstreamMaxPages
+      ) {
+        const nextPage = entry.upstreamPage + 1;
+        const { data: rawPage } = await apiGet(
+          `/achievements/${achievement.id}/users?filter[primary_campus_id]=${requestedCampusId}&page[size]=100&page[number]=${nextPage}`,
+        );
+        entry.upstreamPage = nextPage;
+        if (!Array.isArray(rawPage) || rawPage.length === 0) {
+          entry.exhausted = true;
+          break;
+        }
+        entry.rawHolders = entry.rawHolders.concat(rawPage);
+        if (rawPage.length < 100) { entry.exhausted = true; }
+      }
+      achievementHoldersCache.set(cacheKey, entry);
+
+      const allFiltered = filterHolders(entry.rawHolders);
+      const holders = allFiltered.slice((page - 1) * pageSize, page * pageSize);
+      const hasMore = allFiltered.length > page * pageSize || !entry.exhausted;
+      return res.json({ achievement, holders, page, pageSize, hasMore });
     }
 
     // "All Morocco": the holder objects carry no campus field at all (verified live), so the
     // only way to know which campus each one belongs to is to query per campus separately —
-    // one filtered call per campus, then group under that campus's own section.
+    // one filtered call per campus, then group under that campus's own section. Unpaginated
+    // (unlike the single-campus branch above) — still fetches every campus's full list.
+    const cachedAll = !bypassCache && achievementHoldersCache.get(cacheKey);
+    if (cachedAll?.data && Date.now() - cachedAll.cachedAt < ACHIEVEMENT_HOLDERS_CACHE_TTL_MS) {
+      return res.json({ achievement, ...cachedAll.data });
+    }
+
     const groups = [];
     for (const c of MOROCCAN_CAMPUSES) {
       const rawHolders = await fetchAllPages(
