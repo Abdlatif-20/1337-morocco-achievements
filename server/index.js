@@ -549,9 +549,7 @@ const DEPRECATED_DOMAIN_PAGE = `<!doctype html>
   <div class="card">
     <h1>This domain is no longer valid</h1>
     <p>This site has moved to a new domain.</p>
-    <p>Message me on Discord (<strong>no_name_</strong>) my
-      <a href="https://profile.intra.42.fr/users/aben-nei" target="_blank" rel="noreferrer">intra profile</a>
-      to get the new domain.</p>
+    <p>Visit <a href="https://42-hub.tech/" target="_blank" rel="noreferrer">https://42-hub.tech/</a> instead.</p>
   </div>
 </body>
 </html>`;
