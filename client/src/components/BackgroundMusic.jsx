@@ -13,19 +13,22 @@ const BackgroundMusic = () => {
     const audio = audioRef.current;
     audio.volume = 0.4;
 
-    audio.play()
-      .then(() => setPlaying(true))
-      .catch(() => {
-        const startOnInteraction = () => {
-          audio.play().then(() => setPlaying(true)).catch(() => {});
-        };
-        document.addEventListener('click', startOnInteraction, { once: true });
-        document.addEventListener('keydown', startOnInteraction, { once: true });
-        return () => {
-          document.removeEventListener('click', startOnInteraction);
-          document.removeEventListener('keydown', startOnInteraction);
-        };
-      });
+    const startOnInteraction = () => {
+      audio.play().then(() => setPlaying(true)).catch(() => {});
+    };
+    // Attached unconditionally, not just inside the initial play() rejection — a session
+    // restored from an existing login cookie (no fresh OAuth redirect to "consume" as a
+    // gesture) hits the same autoplay block every time, so the fallback needs to be armed
+    // from the start rather than only after a first failed attempt races against it.
+    document.addEventListener('click', startOnInteraction, { once: true });
+    document.addEventListener('keydown', startOnInteraction, { once: true });
+
+    audio.play().then(() => setPlaying(true)).catch(() => {});
+
+    return () => {
+      document.removeEventListener('click', startOnInteraction);
+      document.removeEventListener('keydown', startOnInteraction);
+    };
   }, []);
 
   const toggle = () => {

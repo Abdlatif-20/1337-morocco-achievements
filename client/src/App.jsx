@@ -22,7 +22,7 @@ const DEFAULT_ACHIEVEMENT = 'Je voudrais un croissant';
 // cache go stale together, so a page reload never shows something the server itself would
 // already consider outdated. Achievement data changes rarely; the Paris-adders scan even
 // more rarely, hence the longer TTL there.
-const ACHIEVEMENT_CACHE_TTL_MS = 15 * 60 * 1000;
+const ACHIEVEMENT_CACHE_TTL_MS = 60 * 60 * 1000;
 const PARIS_CACHE_TTL_MS = 60 * 60 * 1000;
 
 // Tétouan (55) and Rabat (75) have never had a holder of this achievement — searching for it
@@ -367,7 +367,7 @@ const RecentParisSwitchersSection = ({ students, loading, campusId, onOpenStuden
   if (effectiveLoading && students.length === 0) {
     return (
       <>
-        <p className="status-text">Checking for students who recently switched to 42 Paris…</p>
+        <p className="status-text">Checking for students who recently switched to Paris Campus…</p>
         <SkeletonGrid count={3} />
       </>
     );

@@ -669,7 +669,10 @@ app.get('/api/achievements/achieved-date', requireAuth, async (req, res) => {
 // TTL cache — no need for the async pending/ready job machinery that exists specifically to
 // handle a multi-minute operation. Cached per achievement+campus combination; "this year"
 // logins are cached separately (shared across every campus for the same achievement).
-const ACHIEVEMENT_HOLDERS_CACHE_TTL_MS = 15 * 60 * 1000;
+// 60min (not 15) so the this-year-achievers fetch — the expensive worldwide part of the
+// Paris-switchers scan below, shared with this same cache — stays reusable for as long as
+// that scan's own cache does, instead of going cold 4x more often than it needs to.
+const ACHIEVEMENT_HOLDERS_CACHE_TTL_MS = 60 * 60 * 1000;
 const achievementHoldersCache = new Map(); // `${achievementId}:${campusKey}` -> { data, cachedAt }
 // One shared cache of {userId, login} per achievement — both the plain-logins Set (used by
 // the holders route below) and the Paris-switchers scan (which additionally needs userId)
@@ -825,6 +828,11 @@ app.get('/api/campuses/:campusId/paris-adders', requireAuth, async (req, res) =>
 const PARIS_SWITCHERS_CACHE_TTL_MS = 60 * 60 * 1000;
 const parisSwitchersCache = new Map(); // achievementId -> { switchers, cachedAt }
 
+// Starts from the this-year-achievers list (getThisYearAchieversCached) rather than a fresh
+// scan of our own: that list is ALSO what the normal holders route uses to filter holders to
+// this-year-only, so by the time this runs (triggered right after a holders view loads) it's
+// usually already warm in cache — no extra worldwide fetch, just the campus_users bulk-check
+// below on top of a list that was going to be fetched anyway.
 const computeAchievementParisSwitchers = async (achievementId) => {
   const token = await getAppToken();
   const achievers = await getThisYearAchieversCached(achievementId); // [{userId, login}]
