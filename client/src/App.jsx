@@ -458,7 +458,7 @@ const App = () => {
   // this-year holders only (a few hundred, worldwide), NOT a full campus roster scan, so it's
   // one shared fetch for every campus instead of one scan per campus — each result already
   // carries its own `campusId` (the Moroccan campus it's grouped under).
-  const [switchers, setSwitchers] = useState(() => readCache('parisSwitchers', ACHIEVEMENT_CACHE_TTL_MS) || []);
+  const [switchers, setSwitchers] = useState(() => readCache('parisSwitchers', PARIS_CACHE_TTL_MS) || []);
   const [switchersReady, setSwitchersReady] = useState(switchers.length > 0);
   const [switchersLoading, setSwitchersLoading] = useState(false);
 
