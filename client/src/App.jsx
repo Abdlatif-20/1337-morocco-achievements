@@ -633,6 +633,9 @@ const App = () => {
           <p className="footer-meta">
             aben-nei · <a href="https://profile.intra.42.fr/users/aben-nei" target="_blank" rel="noreferrer">42 Profile</a>
           </p>
+          <p className="footer-meta">
+            <a href="https://www.42-hub.tech" target="_blank" rel="noreferrer">www.42-hub.tech</a>
+          </p>
         </footer>
       </div>
     );
