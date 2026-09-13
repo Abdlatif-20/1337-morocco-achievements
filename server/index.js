@@ -349,60 +349,82 @@ const getAppToken = async () => {
 // current size.
 const ROSTER_MAX_PAGES = 60;
 
-const computeParisAdders = async (campusId) => {
-  const token = await getAppToken();
-  const roster = await fetchAllPages(`/campus/${campusId}/users`, { maxPages: ROSTER_MAX_PAGES, tokenOverride: token });
-  const candidates = roster.filter((u) => !u['staff?']);
-  const byId = new Map(candidates.map((u) => [u.id, u]));
-  const adders = [];
-
-  for (let i = 0; i < candidates.length; i += 100) {
-    const chunk = candidates.slice(i, i + 100);
-    const rows = await fetchAllPages(
-      `/campus_users?filter[user_id]=${chunk.map((u) => u.id).join(',')}`,
-      { maxPages: 3, tokenOverride: token },
-    );
-    for (const row of rows) {
-      if (row.campus_id !== PARIS_CAMPUS_ID) { continue; }
-      const u = byId.get(row.user_id);
-      if (!u) { continue; }
-
-      adders.push({
-        id: u.id,
-        login: u.login,
-        displayName: u.usual_full_name || u.displayname || u.login,
-        imageUrl: u.image?.link || u.image?.versions?.medium || null,
-        campuses: [CAMPUS_NAME_LOOKUP[campusId], CAMPUS_NAME_LOOKUP[PARIS_CAMPUS_ID]],
-        poolYear: u.pool_year || null,
-        // When this student's campus_users row for Paris was created — i.e. when Paris was
-        // actually added to their profile. Lets the client flag a "recently switched to
-        // Paris" badge on achievement-holder cards (Khouribga/Benguerir) instead of just a
-        // plain "has Paris" boolean.
-        parisJoinedAt: row.created_at || null,
-        // Whether Paris is their PRIMARY campus right now, and when that row was last
-        // touched (a primary flip updates this even when the row itself was created much
-        // earlier as a secondary campus) — this is what actually explains a student
-        // disappearing from an achievement list filtered by filter[primary_campus_id]: 42's
-        // API filters on the *current* primary campus, so someone who genuinely still holds
-        // the achievement becomes invisible there the moment Paris becomes their primary.
-        isPrimary: Boolean(row.is_primary),
-        primaryUpdatedAt: row.updated_at || row.created_at || null,
-      });
-    }
-  }
-  return adders;
-};
+const mapParisAdderRow = (u, row, campusId) => ({
+  id: u.id,
+  login: u.login,
+  displayName: u.usual_full_name || u.displayname || u.login,
+  imageUrl: u.image?.link || u.image?.versions?.medium || null,
+  campuses: [CAMPUS_NAME_LOOKUP[campusId], CAMPUS_NAME_LOOKUP[PARIS_CAMPUS_ID]],
+  poolYear: u.pool_year || null,
+  // When this student's campus_users row for Paris was created — i.e. when Paris was
+  // actually added to their profile. Lets the client flag a "recently switched to
+  // Paris" badge on achievement-holder cards (Khouribga/Benguerir) instead of just a
+  // plain "has Paris" boolean.
+  parisJoinedAt: row.created_at || null,
+  // Whether Paris is their PRIMARY campus right now, and when that row was last
+  // touched (a primary flip updates this even when the row itself was created much
+  // earlier as a secondary campus) — this is what actually explains a student
+  // disappearing from an achievement list filtered by filter[primary_campus_id]: 42's
+  // API filters on the *current* primary campus, so someone who genuinely still holds
+  // the achievement becomes invisible there the moment Paris becomes their primary.
+  isPrimary: Boolean(row.is_primary),
+  primaryUpdatedAt: row.updated_at || row.created_at || null,
+});
 
 const PARIS_ADDERS_CACHE_TTL_MS = 60 * 60 * 1000; // hourly — this data changes rarely
-const parisAddersCache = new Map(); // campusId -> { adders, cachedAt }
+const parisAddersCache = new Map(); // campusId -> { rosterPage, rosterExhausted, adders, cachedAt }
 
-const getParisAdders = async (campusId, { bypassCache = false } = {}) => {
-  const cached = parisAddersCache.get(campusId);
-  if (!bypassCache && cached && Date.now() - cached.cachedAt < PARIS_ADDERS_CACHE_TTL_MS) {
-    return cached.adders;
+// Paginated like the achievement holders route: only as many roster pages (100 students
+// each) get fetched — and immediately campus_users-checked — as are needed to cover the
+// requested page/size, instead of scanning a campus's entire roster (up to 3800+ students)
+// before returning anything. The cache entry holds progress made so far, so a deeper
+// page/larger size just fetches the additional roster pages needed and extends it.
+const getParisAddersPage = async (campusId, { force = false, page = 1, pageSize = 10 } = {}) => {
+  let entry = !force && parisAddersCache.get(campusId);
+  if (!entry || Date.now() - entry.cachedAt >= PARIS_ADDERS_CACHE_TTL_MS) {
+    entry = { rosterPage: 0, rosterExhausted: false, adders: [], cachedAt: Date.now() };
   }
-  const adders = await computeParisAdders(campusId);
-  parisAddersCache.set(campusId, { adders, cachedAt: Date.now() });
+
+  const token = await getAppToken();
+  const neededCount = page * pageSize;
+
+  while (entry.adders.length < neededCount && !entry.rosterExhausted && entry.rosterPage < ROSTER_MAX_PAGES) {
+    const nextPage = entry.rosterPage + 1;
+    const { data: rosterChunk } = await apiGet(
+      `/campus/${campusId}/users?page[size]=100&page[number]=${nextPage}`,
+      token,
+    );
+    entry.rosterPage = nextPage;
+    if (!Array.isArray(rosterChunk) || rosterChunk.length === 0) { entry.rosterExhausted = true; break; }
+
+    const candidates = rosterChunk.filter((u) => !u['staff?']);
+    if (candidates.length > 0) {
+      const byId = new Map(candidates.map((u) => [u.id, u]));
+      const rows = await fetchAllPages(
+        `/campus_users?filter[user_id]=${candidates.map((u) => u.id).join(',')}`,
+        { maxPages: 3, tokenOverride: token },
+      );
+      for (const row of rows) {
+        if (row.campus_id !== PARIS_CAMPUS_ID) { continue; }
+        const u = byId.get(row.user_id);
+        if (!u) { continue; }
+        entry.adders.push(mapParisAdderRow(u, row, campusId));
+      }
+    }
+    if (rosterChunk.length < 100) { entry.rosterExhausted = true; }
+  }
+  parisAddersCache.set(campusId, entry);
+
+  const adders = entry.adders.slice((page - 1) * pageSize, page * pageSize);
+  const hasMore = entry.adders.length > page * pageSize || !entry.rosterExhausted;
+  return { adders, hasMore };
+};
+
+// Callers that need the FULL list, not one page (the boot-time prewarm below) — an
+// unreachable `pageSize` means getParisAddersPage's internal loop only stops once the whole
+// roster is exhausted, so one call already does the full scan.
+const getParisAdders = async (campusId, { bypassCache = false } = {}) => {
+  const { adders } = await getParisAddersPage(campusId, { force: bypassCache, page: 1, pageSize: Number.MAX_SAFE_INTEGER });
   return adders;
 };
 
@@ -805,12 +827,19 @@ app.get('/api/campuses/:campusId/paris-adders', requireAuth, async (req, res) =>
     return res.status(400).json({ error: 'INVALID_CAMPUS' });
   }
   if (campusId === RABAT_CAMPUS_ID) {
-    return res.json({ adders: [], ready: true });
+    return res.json({ adders: [], ready: true, page: 1, pageSize: 10, hasMore: false });
   }
 
+  const page = Math.max(1, Number(req.query.page) || 1);
+  const pageSize = Math.max(1, Number(req.query.pageSize) || 10);
+
   try {
-    const adders = await getParisAdders(campusId, { bypassCache: req.query.refresh === '1' });
-    res.json({ adders, ready: true });
+    const { adders, hasMore } = await getParisAddersPage(campusId, {
+      force: req.query.refresh === '1',
+      page,
+      pageSize,
+    });
+    res.json({ adders, ready: true, page, pageSize, hasMore });
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });
   }

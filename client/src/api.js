@@ -33,17 +33,19 @@ export const fetchAchievedDate = (login, name) =>
 
 // Tétouan/Rabat have no holders of the croissant achievement, so this is the substitute
 // "visited Paris" signal for those two campuses: students who have Paris on their profile.
-// The server awaits the scan directly and caches the result per campus (first request pays
-// the scan cost — can take up to a minute — every request after that within the cache
-// window is instant), so this single call either returns fast or takes a while; there's
-// nothing to poll for.
-export const fetchCampusParisAdders = (campusId, { refresh = false } = {}) =>
-  request(`/api/campuses/${campusId}/paris-adders${refresh ? '?refresh=1' : ''}`);
-
-export const fetchAllCampusParisAdders = (campusId, onProgress, { refresh = false } = {}) => {
-  onProgress?.([], true);
-  return fetchCampusParisAdders(campusId, { refresh }).then((res) => res.adders);
-};
+// Paginated server-side like the achievement holders route: only as many roster pages as
+// needed to cover the requested page/size get scanned (see server/index.js) — a request can
+// still take a while on a cold cache since Paris-adders is a sparse signal (finding even 10
+// of them can mean scanning most of a campus's roster), but a warm cache is instant.
+export const fetchCampusParisAdders = (campusId, { refresh = false, page, pageSize } = {}) =>
+  request(
+    `/api/campuses/${campusId}/paris-adders?` +
+      new URLSearchParams({
+        ...(page ? { page } : {}),
+        ...(pageSize ? { pageSize } : {}),
+        ...(refresh ? { refresh: '1' } : {}),
+      }),
+  );
 
 // Students who still hold this achievement but vanished from the normal per-campus holders
 // list because their primary campus is now Paris (42's API filters holders by CURRENT

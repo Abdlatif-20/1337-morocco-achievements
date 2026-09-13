@@ -4,7 +4,7 @@ import {
   LOGIN_URL,
   fetchAchievedDate,
   fetchAchievementHolders,
-  fetchAllCampusParisAdders,
+  fetchCampusParisAdders,
   fetchCampuses,
   fetchMe,
   fetchAchievementParisSwitchers,
@@ -94,83 +94,6 @@ const AUTH_ERROR_MESSAGES = {
 };
 
 const PAGE_SIZE_OPTIONS = [10, 50, 100];
-
-// Every student list in this app is already fully fetched client-side (achievement holders,
-// Paris-adders), so pagination/filtering here is just a display slice — no extra API calls.
-// Give it a `key` (e.g. the campus id) wherever the underlying list can change out from
-// under it, so page/filter state resets instead of showing a stale slice from a different
-// list. Promo filter uses `poolYear` (the cohort a student joined in) — 42's API has no
-// gender/sex field anywhere (checked live against a full user object), so that one isn't
-// buildable here.
-// `globalPromoFilter`/`globalPageSize` are how the "All Morocco" view applies ONE Promo
-// filter and ONE page size across every campus group at once: the parent passes its own
-// values down and this component just uses them, hiding its own per-group controls (there's
-// nothing to pick locally, since it's already been picked globally). Every other view (a
-// single campus selected, or a Paris-adders list) leaves both undefined and keeps its own
-// independent controls, since there's only ever one list on screen there anyway.
-const PaginatedStudentGrid = ({ students, onOpenStudent, globalPromoFilter, globalPageSize }) => {
-  const [page, setPage] = useState(1);
-  const [localPageSize, setLocalPageSize] = useState(PAGE_SIZE_OPTIONS[0]);
-  const [localPromoFilter, setLocalPromoFilter] = useState('');
-  const isGlobal = globalPromoFilter !== undefined;
-  const promoFilter = isGlobal ? globalPromoFilter : localPromoFilter;
-  const pageSize = globalPageSize !== undefined ? globalPageSize : localPageSize;
-
-  const promoYears = [...new Set(students.map((s) => s.poolYear).filter(Boolean))].sort().reverse();
-  const filtered = promoFilter ? students.filter((s) => s.poolYear === promoFilter) : students;
-  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
-  const clampedPage = Math.min(page, totalPages);
-  const start = (clampedPage - 1) * pageSize;
-  const pageStudents = filtered.slice(start, start + pageSize);
-
-  // Covers every path a filter/page-size can change through — a local control here, or a
-  // global one re-rendering this with new props — either way, page 1 is where the newly
-  // filtered/resized list should start from instead of possibly landing past its end.
-  useEffect(() => { setPage(1); }, [promoFilter, pageSize]);
-
-  return (
-    <>
-      <div className="filters-row grid-controls">
-        {!isGlobal && (
-          <Dropdown
-            label="Show"
-            value={localPageSize}
-            options={PAGE_SIZE_OPTIONS.map((n) => ({ value: n, label: String(n) }))}
-            onChange={(v) => setLocalPageSize(Number(v))}
-          />
-        )}
-        {!isGlobal && promoYears.length > 0 && (
-          <Dropdown
-            label="Promo"
-            value={localPromoFilter}
-            options={[{ value: '', label: 'All' }, ...promoYears.map((y) => ({ value: y, label: String(y) }))]}
-            onChange={setLocalPromoFilter}
-          />
-        )}
-      </div>
-      {filtered.length === 0 ? (
-        <p className="status-text">No students match this filter.</p>
-      ) : (
-        <div className="student-grid">
-          {pageStudents.map((s) => (
-            <LazyCard key={s.id} student={s} onOpen={() => onOpenStudent(s)} />
-          ))}
-        </div>
-      )}
-      {totalPages > 1 && (
-        <div className="pagination">
-          <button type="button" onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={clampedPage === 1}>
-            ← Prev
-          </button>
-          <span>Page {clampedPage} / {totalPages}</span>
-          <button type="button" onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={clampedPage === totalPages}>
-            Next →
-          </button>
-        </div>
-      )}
-    </>
-  );
-};
 
 // Floating "back to top" arrow — hidden until the page is scrolled down a bit, since these
 // lists (especially "All Morocco") can get long.
@@ -302,20 +225,16 @@ const CampusDropdown = ({ campuses, selectedCampusId, onChange }) => (
 );
 
 // Fallback shown for a campus with zero achievement holders (Tétouan/Rabat, always empty so
-// far): students there who have 42 Paris on their profile. The server caches this per campus
-// (see server/index.js) and refreshes it automatically — the point of this component is to
-// respect that: a cached result renders immediately with no network call at all, and only
-// "Refresh" (or a first-ever visit) actually asks the server, which itself just serves its
-// cache unless that cache is still warming.
-const ParisAddersSection = ({ campusId, campusName, showCount = true, cached, loading, error, onLoad, onOpenStudent, globalPromoFilter, globalPageSize }) => {
-  useEffect(() => {
-    onLoad(campusId);
-  }, [campusId]);
-
+// far): students there who have 42 Paris on their profile. Paginated server-side just like
+// the achievement holders view — only enough of the campus roster gets scanned to cover the
+// requested page/size (see server/index.js's getParisAddersPage), so Show/Prev/Next each
+// trigger a real request instead of slicing one big pre-fetched list. No Promo filter here,
+// same trade-off as the holders view: knowing which promo years exist needs the whole list.
+const ParisAddersSection = ({ campusName, showCount = true, page, pageSize, result, loading, error, onPageChange, onPageSizeChange, onOpenStudent }) => {
   if (error) {
     return <p className="error-text">{error}</p>;
   }
-  const adders = cached?.adders || [];
+  const adders = result?.adders || [];
   if (loading && adders.length === 0) {
     return (
       <>
@@ -324,11 +243,11 @@ const ParisAddersSection = ({ campusId, campusName, showCount = true, cached, lo
       </>
     );
   }
-  if (adders.length === 0) {
+  if (page === 1 && adders.length === 0) {
     return <p className="status-text">No students hold this achievement here, and none have 42 Paris on their profile.</p>;
   }
   // Dedupe (the scan can't produce duplicates, but cheap to guard), sort alphabetically so
-  // the list reads consistently instead of raw campus-roster order, and drop `campuses` —
+  // the page reads consistently instead of raw campus-roster order, and drop `campuses` —
   // StudentCard would otherwise show "Tétouan, Paris" under every name, which is redundant
   // with the section heading/status line right above the grid.
   const sortedAdders = [...new Map(adders.map((a) => [a.id, a])).values()]
@@ -336,21 +255,29 @@ const ParisAddersSection = ({ campusId, campusName, showCount = true, cached, lo
     .map(({ campuses, ...rest }) => rest);
   return (
     <>
-      {showCount ? (
-        <p className="status-text">
-          {sortedAdders.length} student(s) at {campusName}
-          {cached && !cached.ready ? ' (still checking for more)' : ''}
-        </p>
-      ) : (
-        cached && !cached.ready && <p className="status-text">(still checking for more)</p>
-      )}
-      <PaginatedStudentGrid
-        key={campusId}
-        students={sortedAdders}
-        onOpenStudent={onOpenStudent}
-        globalPromoFilter={globalPromoFilter}
-        globalPageSize={globalPageSize}
-      />
+      <div className="filters-row grid-controls">
+        <Dropdown
+          label="Show"
+          value={pageSize}
+          options={PAGE_SIZE_OPTIONS.map((n) => ({ value: n, label: String(n) }))}
+          onChange={(v) => onPageSizeChange(Number(v))}
+        />
+      </div>
+      {showCount && <p className="status-text">Page {page} at {campusName}</p>}
+      <div className="student-grid">
+        {sortedAdders.map((s) => (
+          <LazyCard key={s.id} student={s} onOpen={() => onOpenStudent(s)} />
+        ))}
+      </div>
+      <div className="pagination">
+        <button type="button" onClick={() => onPageChange(Math.max(1, page - 1))} disabled={page === 1 || loading}>
+          ← Prev
+        </button>
+        <span>Page {page}</span>
+        <button type="button" onClick={() => onPageChange(page + 1)} disabled={!result?.hasMore || loading}>
+          Next →
+        </button>
+      </div>
     </>
   );
 };
@@ -375,7 +302,7 @@ const RecentParisSwitchersSection = ({ students, loading, campusId, onOpenStuden
   const sorted = [...students].sort((a, b) => a.displayName.localeCompare(b.displayName));
   return (
     <div className="campus-group">
-      <h2 className="section-heading">✈️ Recently switched to 42 Paris ({sorted.length})</h2>
+      <h2 className="section-heading">✈️ Recently switched to Paris Campus ({sorted.length})</h2>
       {sorted.length === 0 ? (
         <p className="status-text">
           No students here have switched their primary campus to 42 Paris since August.
@@ -492,19 +419,21 @@ const App = () => {
     writeCache('parisAdders', readyOnly);
   }, [parisCache]);
 
+  // Used for the ✈️ badge cross-reference (any campus with real holders) — needs the FULL
+  // Paris-adders list, not one page, since a badge lookup has to check any given holder's
+  // login against the whole set. Requests an effectively-unbounded pageSize so the server
+  // (see getParisAddersPage) just keeps scanning roster pages until exhausted — the same
+  // incremental cache entry a paginated request would've built anyway, just driven to
+  // completion in one call instead of many small ones.
   const loadParisAdders = (campusId, { force = false } = {}) => {
-    // Already have a finished result and nothing asked for a refresh — don't call the API
-    // at all, just keep showing what's cached.
     if (!force && parisCache[campusId]?.ready) { return; }
     if (parisLoading[campusId]) { return; }
 
     setParisLoading((prev) => ({ ...prev, [campusId]: true }));
     setParisError((prev) => ({ ...prev, [campusId]: null }));
-    fetchAllCampusParisAdders(campusId, (soFar) => {
-      setParisCache((prev) => ({ ...prev, [campusId]: { adders: soFar, ready: false } }));
-    }, { refresh: force })
-      .then((all) => {
-        setParisCache((prev) => ({ ...prev, [campusId]: { adders: all, ready: true } }));
+    fetchCampusParisAdders(campusId, { refresh: force, page: 1, pageSize: 100000 })
+      .then((res) => {
+        setParisCache((prev) => ({ ...prev, [campusId]: { adders: res.adders, ready: true } }));
       })
       .catch((err) => {
         if (err.status === 401) { setMe(null); return; }
@@ -513,6 +442,30 @@ const App = () => {
       .finally(() => {
         setParisLoading((prev) => ({ ...prev, [campusId]: false }));
       });
+  };
+
+  // The paginated DISPLAY version — Tétouan/Rabat's own fallback view, Show/Prev/Next driving
+  // real per-page requests instead of slicing a big pre-fetched list.
+  const [addersPage, setAddersPage] = useState({}); // campusId -> page
+  const [addersPageSize, setAddersPageSize] = useState(PAGE_SIZE_OPTIONS[0]);
+  const [addersResult, setAddersResult] = useState({}); // campusId -> { adders, hasMore }
+  const [addersLoading, setAddersLoading] = useState({});
+  const [addersError, setAddersError] = useState({});
+
+  const loadAddersPage = (campusId, { force = false, page, pageSize } = {}) => {
+    const p = page ?? addersPage[campusId] ?? 1;
+    const size = pageSize ?? addersPageSize;
+    setAddersLoading((prev) => ({ ...prev, [campusId]: true }));
+    setAddersError((prev) => ({ ...prev, [campusId]: null }));
+    fetchCampusParisAdders(campusId, { refresh: force, page: p, pageSize: size })
+      .then((res) => {
+        setAddersResult((prev) => ({ ...prev, [campusId]: res }));
+      })
+      .catch((err) => {
+        if (err.status === 401) { setMe(null); return; }
+        setAddersError((prev) => ({ ...prev, [campusId]: err.message }));
+      })
+      .finally(() => setAddersLoading((prev) => ({ ...prev, [campusId]: false })));
   };
 
   // The achievement-gated version of the Paris-adders scan — students who genuinely hold the
@@ -642,6 +595,28 @@ const App = () => {
     });
   }, [groupResults, selectedCampusId]);
 
+  // Triggers the DISPLAY-paginated Paris-adders fetch (Tétouan/Rabat's own fallback view)
+  // once a campus's holders result comes back empty on page 1 — mirrors how the holders
+  // fetch itself is triggered, just for this fallback view instead.
+  useEffect(() => {
+    if (!selectedCampusId) { return; }
+    const id = Number(selectedCampusId);
+    if (achievementResult?.page === 1 && achievementResult.holders.length === 0) {
+      if (!addersLoading[id] && !addersResult[id]) { loadAddersPage(id, { page: 1 }); }
+    }
+  }, [achievementResult, selectedCampusId]);
+
+  useEffect(() => {
+    if (selectedCampusId) { return; }
+    Object.entries(groupResults).forEach(([campusIdStr, res]) => {
+      const id = Number(campusIdStr);
+      const page = groupPages[id] ?? 1;
+      if (page === 1 && (res?.holders?.length ?? 0) === 0) {
+        if (!addersLoading[id] && !addersResult[id]) { loadAddersPage(id, { page: 1 }); }
+      }
+    });
+  }, [groupResults, selectedCampusId]);
+
   // The achievement-gated switchers list is one shared fetch (not per campus) — triggered
   // once whenever there's a holders result to show it alongside, regardless of which
   // Moroccan campus(es) that result covers.
@@ -716,9 +691,6 @@ const App = () => {
           <p className="footer-meta">
             aben-nei · <a href="https://profile.intra.42.fr/users/aben-nei" target="_blank" rel="noreferrer">42 Profile</a>
           </p>
-          <p className="footer-meta">
-            <a href="https://www.42-hub.tech" target="_blank" rel="noreferrer">www.42-hub.tech</a>
-          </p>
         </footer>
       </div>
     );
@@ -760,10 +732,14 @@ const App = () => {
               loadHolders(selectedCampusId, { force: true, page: holdersPage, pageSize: holdersPageSize });
               if (NO_ACHIEVEMENT_CAMPUS_IDS.includes(Number(selectedCampusId))) {
                 loadParisAdders(Number(selectedCampusId), { force: true });
+                loadAddersPage(Number(selectedCampusId), { force: true, page: 1 });
               }
             } else {
               campuses.forEach((c) => loadGroupCampus(c.id, { force: true, page: groupPages[c.id] ?? 1 }));
-              NO_ACHIEVEMENT_CAMPUS_IDS.forEach((id) => loadParisAdders(id, { force: true }));
+              NO_ACHIEVEMENT_CAMPUS_IDS.forEach((id) => {
+                loadParisAdders(id, { force: true });
+                loadAddersPage(id, { force: true, page: 1 });
+              });
             }
           }}
           disabled={(selectedCampusId ? achievementLoading : anyGroupLoading) || refreshesLeft <= 0}
@@ -804,12 +780,21 @@ const App = () => {
                 <>
                   {achievementResult.page === 1 && achievementResult.holders.length === 0 ? (
                     <ParisAddersSection
-                      campusId={Number(selectedCampusId)}
                       campusName={campuses.find((c) => String(c.id) === selectedCampusId)?.name}
-                      cached={parisCache[Number(selectedCampusId)]}
-                      loading={Boolean(parisLoading[Number(selectedCampusId)])}
-                      error={parisError[Number(selectedCampusId)]}
-                      onLoad={loadParisAdders}
+                      page={addersPage[Number(selectedCampusId)] ?? 1}
+                      pageSize={addersPageSize}
+                      result={addersResult[Number(selectedCampusId)]}
+                      loading={Boolean(addersLoading[Number(selectedCampusId)])}
+                      error={addersError[Number(selectedCampusId)]}
+                      onPageChange={(p) => {
+                        setAddersPage((prev) => ({ ...prev, [Number(selectedCampusId)]: p }));
+                        loadAddersPage(Number(selectedCampusId), { page: p });
+                      }}
+                      onPageSizeChange={(size) => {
+                        setAddersPageSize(size);
+                        setAddersPage((prev) => ({ ...prev, [Number(selectedCampusId)]: 1 }));
+                        loadAddersPage(Number(selectedCampusId), { page: 1, pageSize: size });
+                      }}
                       onOpenStudent={openHolderDetail}
                     />
                   ) : (
@@ -903,13 +888,22 @@ const App = () => {
                         <SkeletonGrid />
                       ) : page === 1 && holders.length === 0 ? (
                         <ParisAddersSection
-                          campusId={c.id}
                           campusName={c.name}
                           showCount={false}
-                          cached={parisCache[c.id]}
-                          loading={Boolean(parisLoading[c.id])}
-                          error={parisError[c.id]}
-                          onLoad={loadParisAdders}
+                          page={addersPage[c.id] ?? 1}
+                          pageSize={addersPageSize}
+                          result={addersResult[c.id]}
+                          loading={Boolean(addersLoading[c.id])}
+                          error={addersError[c.id]}
+                          onPageChange={(p) => {
+                            setAddersPage((prev) => ({ ...prev, [c.id]: p }));
+                            loadAddersPage(c.id, { page: p });
+                          }}
+                          onPageSizeChange={(size) => {
+                            setAddersPageSize(size);
+                            setAddersPage((prev) => ({ ...prev, [c.id]: 1 }));
+                            loadAddersPage(c.id, { page: 1, pageSize: size });
+                          }}
                           onOpenStudent={openHolderDetail}
                         />
                       ) : (

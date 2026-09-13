@@ -914,7 +914,10 @@ button {
   border-radius: var(--radius-md);
   padding: 10px;
   min-width: 150px;
-  z-index: 20;
+  /* Same stacking-context issue as .filters-row's backdrop-filter (see comment above it) —
+     .filters-row sits later in the DOM with z-index:30, painting over this dropdown despite
+     it visually overlapping from above. Needs to clear that. */
+  z-index: 60;
   box-shadow: var(--shadow-md);
 }
 
