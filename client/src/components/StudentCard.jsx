@@ -29,6 +29,11 @@ const StudentCard = ({ student, onOpen }) => {
             {student.campuses.map((c) => c.name).join(', ')}
           </span>
         )}
+        {student.switchedAt && (
+          <span className="student-campus">
+            Switched to Paris on {new Date(student.switchedAt).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}
+          </span>
+        )}
       </div>
       {isOwner ? (
         <span className="student-badge student-badge-owner" title="Owner — built this site">👑</span>

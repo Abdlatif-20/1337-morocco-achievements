@@ -893,7 +893,7 @@ const computeAchievementParisSwitchers = async (achievementId) => {
       const homeRow = userRows.find((r) => MOROCCAN_CAMPUSES.some((c) => c.id === r.campus_id));
       if (!homeRow) { continue; }
 
-      matches.push({ userId, login: loginById.get(userId), campusId: homeRow.campus_id });
+      matches.push({ userId, login: loginById.get(userId), campusId: homeRow.campus_id, switchedAt });
     }
   }
   if (matches.length === 0) { return []; }
@@ -917,6 +917,7 @@ const computeAchievementParisSwitchers = async (achievementId) => {
         poolYear: u.pool_year || null,
         campusId: m.campusId,
         recentParisMove: true,
+        switchedAt: m.switchedAt,
       };
     })
     .filter(Boolean);
