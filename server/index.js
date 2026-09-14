@@ -417,7 +417,10 @@ const getParisAddersPage = async (campusId, { force = false, page = 1, pageSize 
 
   const adders = entry.adders.slice((page - 1) * pageSize, page * pageSize);
   const hasMore = entry.adders.length > page * pageSize || !entry.rosterExhausted;
-  return { adders, hasMore };
+  // Only known once the whole roster's been scanned — null until then, same pattern as
+  // achievement holders' exactTotal.
+  const exactTotal = entry.rosterExhausted ? entry.adders.length : null;
+  return { adders, hasMore, exactTotal };
 };
 
 // Callers that need the FULL list, not one page (the boot-time prewarm below) — an
@@ -762,7 +765,7 @@ app.get('/api/achievements/holders', requireAuth, async (req, res) => {
 
       let entry = !bypassCache && achievementHoldersCache.get(cacheKey);
       if (!entry || Date.now() - entry.cachedAt >= ACHIEVEMENT_HOLDERS_CACHE_TTL_MS) {
-        entry = { rawHolders: [], upstreamPage: 0, exhausted: false, cachedAt: Date.now() };
+        entry = { rawHolders: [], upstreamPage: 0, exhausted: false, total: null, cachedAt: Date.now() };
       }
 
       const upstreamMaxPages = 5; // same ceiling as before (500 raw holders per campus)
@@ -772,9 +775,13 @@ app.get('/api/achievements/holders', requireAuth, async (req, res) => {
         entry.upstreamPage < upstreamMaxPages
       ) {
         const nextPage = entry.upstreamPage + 1;
-        const { data: rawPage } = await apiGet(
+        const { data: rawPage, total } = await apiGet(
           `/achievements/${achievement.id}/users?filter[primary_campus_id]=${requestedCampusId}&page[size]=100&page[number]=${nextPage}`,
         );
+        // 42 reports the RAW total via the x-total header — free on every request, no extra
+        // call needed — but it's the count before our staff/this-year filtering, so it can
+        // read a little higher than `holders` actually ends up containing.
+        if (total != null) { entry.total = total; }
         entry.upstreamPage = nextPage;
         if (!Array.isArray(rawPage) || rawPage.length === 0) {
           entry.exhausted = true;
@@ -788,7 +795,12 @@ app.get('/api/achievements/holders', requireAuth, async (req, res) => {
       const allFiltered = filterHolders(entry.rawHolders);
       const holders = allFiltered.slice((page - 1) * pageSize, page * pageSize);
       const hasMore = allFiltered.length > page * pageSize || !entry.exhausted;
-      return res.json({ achievement, holders, page, pageSize, hasMore });
+      // Only known once the roster's been scanned all the way through (entry.exhausted) —
+      // null until then. `total` (the raw x-total header) is available immediately as a
+      // rough stand-in; the client shows that first and swaps in this exact count once a
+      // background full-scan request (see fetchAchievementHolders in api.js) completes.
+      const exactTotal = entry.exhausted ? allFiltered.length : null;
+      return res.json({ achievement, holders, page, pageSize, hasMore, total: entry.total, exactTotal });
     }
 
     // "All Morocco": the holder objects carry no campus field at all (verified live), so the
@@ -827,19 +839,19 @@ app.get('/api/campuses/:campusId/paris-adders', requireAuth, async (req, res) =>
     return res.status(400).json({ error: 'INVALID_CAMPUS' });
   }
   if (campusId === RABAT_CAMPUS_ID) {
-    return res.json({ adders: [], ready: true, page: 1, pageSize: 10, hasMore: false });
+    return res.json({ adders: [], ready: true, page: 1, pageSize: 10, hasMore: false, exactTotal: 0 });
   }
 
   const page = Math.max(1, Number(req.query.page) || 1);
   const pageSize = Math.max(1, Number(req.query.pageSize) || 10);
 
   try {
-    const { adders, hasMore } = await getParisAddersPage(campusId, {
+    const { adders, hasMore, exactTotal } = await getParisAddersPage(campusId, {
       force: req.query.refresh === '1',
       page,
       pageSize,
     });
-    res.json({ adders, ready: true, page, pageSize, hasMore });
+    res.json({ adders, ready: true, page, pageSize, hasMore, exactTotal });
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });
   }

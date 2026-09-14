@@ -230,7 +230,7 @@ const CampusDropdown = ({ campuses, selectedCampusId, onChange }) => (
 // requested page/size (see server/index.js's getParisAddersPage), so Show/Prev/Next each
 // trigger a real request instead of slicing one big pre-fetched list. No Promo filter here,
 // same trade-off as the holders view: knowing which promo years exist needs the whole list.
-const ParisAddersSection = ({ campusName, showCount = true, page, pageSize, result, loading, error, onPageChange, onPageSizeChange, onOpenStudent }) => {
+const ParisAddersSection = ({ campusName, showCount = true, page, pageSize, result, exactTotal, loading, error, onPageChange, onPageSizeChange, onOpenStudent }) => {
   if (error) {
     return <p className="error-text">{error}</p>;
   }
@@ -263,7 +263,11 @@ const ParisAddersSection = ({ campusName, showCount = true, page, pageSize, resu
           onChange={(v) => onPageSizeChange(Number(v))}
         />
       </div>
-      {showCount && <p className="status-text">Page {page} at {campusName}</p>}
+      {showCount && (
+        <p className="status-text">
+          {exactTotal != null ? `${exactTotal} student(s)` : `Page ${page}`} at {campusName}
+        </p>
+      )}
       <div className="student-grid">
         {sortedAdders.map((s) => (
           <LazyCard key={s.id} student={s} onOpen={() => onOpenStudent(s)} />
@@ -452,6 +456,21 @@ const App = () => {
   const [addersLoading, setAddersLoading] = useState({});
   const [addersError, setAddersError] = useState({});
 
+  // Exact Paris-adders count per campus — null until a background full-roster-scan request
+  // (same trick as ensureExactTotal for achievement holders) finishes.
+  const [exactAddersTotals, setExactAddersTotals] = useState({}); // campusId -> number
+
+  const ensureExactAddersTotal = (campusId) => {
+    if (exactAddersTotals[campusId] != null) { return; }
+    fetchCampusParisAdders(campusId, { page: 1, pageSize: 1000000 })
+      .then((res) => {
+        if (res.exactTotal != null) {
+          setExactAddersTotals((prev) => ({ ...prev, [campusId]: res.exactTotal }));
+        }
+      })
+      .catch(() => {});
+  };
+
   const loadAddersPage = (campusId, { force = false, page, pageSize } = {}) => {
     const p = page ?? addersPage[campusId] ?? 1;
     const size = pageSize ?? addersPageSize;
@@ -460,6 +479,7 @@ const App = () => {
     fetchCampusParisAdders(campusId, { refresh: force, page: p, pageSize: size })
       .then((res) => {
         setAddersResult((prev) => ({ ...prev, [campusId]: res }));
+        ensureExactAddersTotal(campusId);
       })
       .catch((err) => {
         if (err.status === 401) { setMe(null); return; }
@@ -505,6 +525,23 @@ const App = () => {
   // response matching the most recently *started* request is ever applied.
   const latestHoldersKeyRef = useRef(null);
 
+  // Exact per-campus holder count (post staff/this-year filtering) — null until a background
+  // full-scan request (see ensureExactTotal) finishes. Kept separate from achievementResult
+  // since it survives page/pageSize changes and grouped-vs-single-campus switches, instead of
+  // being re-derived (and re-fetched) every time either of those change.
+  const [exactTotals, setExactTotals] = useState({}); // campusId -> number
+
+  const ensureExactTotal = (campusId) => {
+    if (exactTotals[campusId] != null) { return; }
+    fetchAchievementHolders(DEFAULT_ACHIEVEMENT, campusId, { page: 1, pageSize: 1000000 })
+      .then((res) => {
+        if (res.exactTotal != null) {
+          setExactTotals((prev) => ({ ...prev, [campusId]: res.exactTotal }));
+        }
+      })
+      .catch(() => {});
+  };
+
   const loadHolders = (campusId, { force = false, page = holdersPage, pageSize = holdersPageSize } = {}) => {
     const key = `${campusId}:${page}:${pageSize}`;
     latestHoldersKeyRef.current = key;
@@ -512,6 +549,7 @@ const App = () => {
     if (!force && cache[key]) {
       setAchievementResult(cache[key]);
       setAchievementError(null);
+      ensureExactTotal(campusId);
       return;
     }
 
@@ -522,6 +560,7 @@ const App = () => {
         setCache((prev) => ({ ...prev, [key]: res }));
         if (latestHoldersKeyRef.current !== key) { return; }
         setAchievementResult(res);
+        ensureExactTotal(campusId);
       })
       .catch((err) => {
         if (err.status === 401) { setMe(null); return; }
@@ -547,6 +586,7 @@ const App = () => {
 
     if (!force && cache[key]) {
       setGroupResults((prev) => ({ ...prev, [campusId]: cache[key] }));
+      ensureExactTotal(campusId);
       return;
     }
 
@@ -555,6 +595,7 @@ const App = () => {
       .then((res) => {
         setCache((prev) => ({ ...prev, [key]: res }));
         setGroupResults((prev) => ({ ...prev, [campusId]: res }));
+        ensureExactTotal(campusId);
       })
       .catch((err) => {
         if (err.status === 401) { setMe(null); }
@@ -644,6 +685,19 @@ const App = () => {
   const excludeSwitchers = (campusId, holders) => {
     const switcherLogins = new Set(switchers.filter((s) => s.campusId === campusId).map((s) => s.login));
     return holders.filter((h) => !switcherLogins.has(h.login));
+  };
+
+  // The number actually shown for a campus in the "All Morocco" view — matches whichever
+  // dataset that campus's section is rendering: achievement holders normally, or Paris-adders
+  // when a campus has zero holders and falls back to that list instead (Tétouan today). Used
+  // both for each campus's own heading and for the grand total, so the two always agree —
+  // summing achievement-holder counts alone would silently drop campuses like Tétouan that
+  // are showing a real, non-empty list via the fallback.
+  const campusDisplayTotal = (c) => {
+    const res = groupResults[c.id];
+    const page = groupPages[c.id] ?? 1;
+    const isAddersFallback = page === 1 && (res?.holders?.length ?? 0) === 0;
+    return isAddersFallback ? exactAddersTotals[c.id] : (exactTotals[c.id] ?? null);
   };
 
   // The achieved date is fetched lazily here, only for the one student actually opened —
@@ -784,6 +838,7 @@ const App = () => {
                       page={addersPage[Number(selectedCampusId)] ?? 1}
                       pageSize={addersPageSize}
                       result={addersResult[Number(selectedCampusId)]}
+                      exactTotal={exactAddersTotals[Number(selectedCampusId)]}
                       loading={Boolean(addersLoading[Number(selectedCampusId)])}
                       error={addersError[Number(selectedCampusId)]}
                       onPageChange={(p) => {
@@ -808,7 +863,11 @@ const App = () => {
                         />
                       </div>
                       <p className="status-text">
-                        Page {achievementResult.page} at{' '}
+                        {exactTotals[Number(selectedCampusId)] != null
+                          ? `${exactTotals[Number(selectedCampusId)]} student(s)`
+                          : achievementResult.total != null
+                            ? `~${achievementResult.total} student(s)`
+                            : `Page ${achievementResult.page}`} at{' '}
                         {campuses.find((c) => String(c.id) === selectedCampusId)?.name}
                       </p>
                       <div className="student-grid">
@@ -866,6 +925,11 @@ const App = () => {
               ))
             ) : (
               <>
+                {campuses.every((c) => campusDisplayTotal(c) != null) && (
+                  <p className="status-text total-count">
+                    {campuses.reduce((sum, c) => sum + campusDisplayTotal(c), 0)} student(s) total across all campuses
+                  </p>
+                )}
                 <div className="filters-row grid-controls">
                   <Dropdown
                     label="Show"
@@ -883,7 +947,20 @@ const App = () => {
                   const holders = res?.holders || [];
                   return (
                     <div key={c.id} className="campus-group">
-                      <h2 className="section-heading">{c.name}</h2>
+                      <h2 className="section-heading">
+                        {c.name}
+                        {/* Shows whichever total actually matches what's rendered below — a
+                            campus with zero holders falls back to the Paris-adders list
+                            instead (a different dataset), so its own total is shown there,
+                            not the (misleading) achievement-holders one. */}
+                        {page === 1 && holders.length === 0
+                          ? (exactAddersTotals[c.id] != null ? ` (${exactAddersTotals[c.id]})` : '')
+                          : (exactTotals[c.id] != null
+                              ? ` (${exactTotals[c.id]})`
+                              : res?.total != null
+                                ? ` (~${res.total})`
+                                : '')}
+                      </h2>
                       {loading && holders.length === 0 ? (
                         <SkeletonGrid />
                       ) : page === 1 && holders.length === 0 ? (
@@ -893,6 +970,7 @@ const App = () => {
                           page={addersPage[c.id] ?? 1}
                           pageSize={addersPageSize}
                           result={addersResult[c.id]}
+                          exactTotal={exactAddersTotals[c.id]}
                           loading={Boolean(addersLoading[c.id])}
                           error={addersError[c.id]}
                           onPageChange={(p) => {
