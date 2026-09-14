@@ -19,12 +19,13 @@ export const fetchStudentProfile = (login) =>
 // receives the one page it asked for, not the whole campus. The grouped "All Morocco" view
 // (no campusId) is unpaginated, unchanged: one plain JSON response with every campus's full
 // list.
-export const fetchAchievementHolders = (name, campusId = null, { refresh = false, page, pageSize } = {}) =>
+export const fetchAchievementHolders = (name, campusId = null, { refresh = false, page, pageSize, promo } = {}) =>
   request(
     `/api/achievements/holders?name=${encodeURIComponent(name)}` +
       (campusId ? `&campus=${campusId}` : '') +
       (campusId && page ? `&page=${page}` : '') +
       (campusId && pageSize ? `&pageSize=${pageSize}` : '') +
+      (campusId && promo ? `&promo=${encodeURIComponent(promo)}` : '') +
       (refresh ? '&refresh=1' : ''),
   );
 
@@ -37,12 +38,13 @@ export const fetchAchievedDate = (login, name) =>
 // needed to cover the requested page/size get scanned (see server/index.js) — a request can
 // still take a while on a cold cache since Paris-adders is a sparse signal (finding even 10
 // of them can mean scanning most of a campus's roster), but a warm cache is instant.
-export const fetchCampusParisAdders = (campusId, { refresh = false, page, pageSize } = {}) =>
+export const fetchCampusParisAdders = (campusId, { refresh = false, page, pageSize, promo } = {}) =>
   request(
     `/api/campuses/${campusId}/paris-adders?` +
       new URLSearchParams({
         ...(page ? { page } : {}),
         ...(pageSize ? { pageSize } : {}),
+        ...(promo ? { promo } : {}),
         ...(refresh ? { refresh: '1' } : {}),
       }),
   );

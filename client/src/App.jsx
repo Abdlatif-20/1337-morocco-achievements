@@ -230,7 +230,7 @@ const CampusDropdown = ({ campuses, selectedCampusId, onChange }) => (
 // requested page/size (see server/index.js's getParisAddersPage), so Show/Prev/Next each
 // trigger a real request instead of slicing one big pre-fetched list. No Promo filter here,
 // same trade-off as the holders view: knowing which promo years exist needs the whole list.
-const ParisAddersSection = ({ campusName, showCount = true, page, pageSize, result, exactTotal, loading, error, onPageChange, onPageSizeChange, onOpenStudent }) => {
+const ParisAddersSection = ({ campusName, showCount = true, hideControls = false, page, pageSize, promo, promoYears, result, exactTotal, loading, error, onPageChange, onPageSizeChange, onPromoChange, onOpenStudent }) => {
   if (error) {
     return <p className="error-text">{error}</p>;
   }
@@ -244,7 +244,13 @@ const ParisAddersSection = ({ campusName, showCount = true, page, pageSize, resu
     );
   }
   if (page === 1 && adders.length === 0) {
-    return <p className="status-text">No students hold this achievement here, and none have 42 Paris on their profile.</p>;
+    return (
+      <p className="status-text">
+        {promo
+          ? `No students from promo ${promo} here have 42 Paris on their profile.`
+          : 'No students hold this achievement here, and none have 42 Paris on their profile.'}
+      </p>
+    );
   }
   // Dedupe (the scan can't produce duplicates, but cheap to guard), sort alphabetically so
   // the page reads consistently instead of raw campus-roster order, and drop `campuses` —
@@ -255,14 +261,24 @@ const ParisAddersSection = ({ campusName, showCount = true, page, pageSize, resu
     .map(({ campuses, ...rest }) => rest);
   return (
     <>
-      <div className="filters-row grid-controls">
-        <Dropdown
-          label="Show"
-          value={pageSize}
-          options={PAGE_SIZE_OPTIONS.map((n) => ({ value: n, label: String(n) }))}
-          onChange={(v) => onPageSizeChange(Number(v))}
-        />
-      </div>
+      {!hideControls && (
+        <div className="filters-row grid-controls">
+          <Dropdown
+            label="Show"
+            value={pageSize}
+            options={PAGE_SIZE_OPTIONS.map((n) => ({ value: n, label: String(n) }))}
+            onChange={(v) => onPageSizeChange(Number(v))}
+          />
+          {promoYears?.length > 0 && (
+            <Dropdown
+              label="Promo"
+              value={promo}
+              options={[{ value: '', label: 'All' }, ...promoYears.map((y) => ({ value: y, label: String(y) }))]}
+              onChange={onPromoChange}
+            />
+          )}
+        </div>
+      )}
       {showCount && (
         <p className="status-text">
           {exactTotal != null ? `${exactTotal} student(s)` : `Page ${page}`} at {campusName}
@@ -357,7 +373,8 @@ const App = () => {
   // campus's whole holder list to know which years even exist, which defeats the point of
   // backend pagination (only fetching the page actually requested).
   const [globalPageSize, setGlobalPageSize] = useState(PAGE_SIZE_OPTIONS[0]);
-  useEffect(() => { setGlobalPageSize(PAGE_SIZE_OPTIONS[0]); }, [selectedCampusId]);
+  const [globalPromo, setGlobalPromo] = useState('');
+  useEffect(() => { setGlobalPageSize(PAGE_SIZE_OPTIONS[0]); setGlobalPromo(''); }, [selectedCampusId]);
   const [achievementResult, setAchievementResult] = useState(null);
   const [achievementError, setAchievementError] = useState(null);
   const [achievementLoading, setAchievementLoading] = useState(false);
@@ -366,7 +383,8 @@ const App = () => {
   // size changes, so neither carries a stale page number into a fresh selection.
   const [holdersPage, setHoldersPage] = useState(1);
   const [holdersPageSize, setHoldersPageSize] = useState(PAGE_SIZE_OPTIONS[0]);
-  useEffect(() => { setHoldersPage(1); }, [selectedCampusId, holdersPageSize]);
+  const [holdersPromo, setHoldersPromo] = useState('');
+  useEffect(() => { setHoldersPage(1); setHoldersPromo(''); }, [selectedCampusId, holdersPageSize]);
 
   // "All Morocco" is now ALSO backend-paginated: instead of one big request that fetches
   // every campus's full holder list, each campus group is fetched independently through the
@@ -455,10 +473,18 @@ const App = () => {
   const [addersResult, setAddersResult] = useState({}); // campusId -> { adders, hasMore }
   const [addersLoading, setAddersLoading] = useState({});
   const [addersError, setAddersError] = useState({});
+  // Grouped "All Morocco" view's Paris-adders fallback shares globalPageSize (not
+  // addersPageSize, which is only for the single-campus fallback's own local Show control) —
+  // reset each campus's adders page back to 1 whenever the campus selection or that global
+  // page size changes, same as groupPages above.
+  useEffect(() => { setAddersPage({}); }, [selectedCampusId, globalPageSize]);
 
   // Exact Paris-adders count per campus — null until a background full-roster-scan request
   // (same trick as ensureExactTotal for achievement holders) finishes.
   const [exactAddersTotals, setExactAddersTotals] = useState({}); // campusId -> number
+
+  const [addersPromoYears, setAddersPromoYears] = useState({}); // campusId -> string[]
+  const [addersPromo, setAddersPromo] = useState({}); // campusId -> selected year ('' = all)
 
   const ensureExactAddersTotal = (campusId) => {
     if (exactAddersTotals[campusId] != null) { return; }
@@ -467,16 +493,20 @@ const App = () => {
         if (res.exactTotal != null) {
           setExactAddersTotals((prev) => ({ ...prev, [campusId]: res.exactTotal }));
         }
+        if (res.promoYears) {
+          setAddersPromoYears((prev) => ({ ...prev, [campusId]: res.promoYears }));
+        }
       })
       .catch(() => {});
   };
 
-  const loadAddersPage = (campusId, { force = false, page, pageSize } = {}) => {
+  const loadAddersPage = (campusId, { force = false, page, pageSize, promo } = {}) => {
     const p = page ?? addersPage[campusId] ?? 1;
     const size = pageSize ?? addersPageSize;
+    const yr = promo ?? addersPromo[campusId] ?? '';
     setAddersLoading((prev) => ({ ...prev, [campusId]: true }));
     setAddersError((prev) => ({ ...prev, [campusId]: null }));
-    fetchCampusParisAdders(campusId, { refresh: force, page: p, pageSize: size })
+    fetchCampusParisAdders(campusId, { refresh: force, page: p, pageSize: size, promo: yr })
       .then((res) => {
         setAddersResult((prev) => ({ ...prev, [campusId]: res }));
         ensureExactAddersTotal(campusId);
@@ -530,6 +560,7 @@ const App = () => {
   // since it survives page/pageSize changes and grouped-vs-single-campus switches, instead of
   // being re-derived (and re-fetched) every time either of those change.
   const [exactTotals, setExactTotals] = useState({}); // campusId -> number
+  const [holdersPromoYears, setHoldersPromoYears] = useState({}); // campusId -> string[]
 
   const ensureExactTotal = (campusId) => {
     if (exactTotals[campusId] != null) { return; }
@@ -538,29 +569,33 @@ const App = () => {
         if (res.exactTotal != null) {
           setExactTotals((prev) => ({ ...prev, [campusId]: res.exactTotal }));
         }
+        if (res.promoYears) {
+          setHoldersPromoYears((prev) => ({ ...prev, [campusId]: res.promoYears }));
+        }
       })
       .catch(() => {});
   };
 
-  const loadHolders = (campusId, { force = false, page = holdersPage, pageSize = holdersPageSize } = {}) => {
-    const key = `${campusId}:${page}:${pageSize}`;
+  const loadHolders = (campusId, { force = false, page = holdersPage, pageSize = holdersPageSize, promo = holdersPromo } = {}) => {
+    const key = `${campusId}:${page}:${pageSize}:${promo}`;
     latestHoldersKeyRef.current = key;
 
+    // ensureExactTotal for this campusId is fired eagerly, in parallel, from the effect that
+    // calls loadHolders (see below) — not repeated here, to avoid sending the same expensive
+    // full-scan request twice concurrently.
     if (!force && cache[key]) {
       setAchievementResult(cache[key]);
       setAchievementError(null);
-      ensureExactTotal(campusId);
       return;
     }
 
     setAchievementLoading(true);
     setAchievementError(null);
-    fetchAchievementHolders(DEFAULT_ACHIEVEMENT, campusId, { refresh: force, page, pageSize })
+    fetchAchievementHolders(DEFAULT_ACHIEVEMENT, campusId, { refresh: force, page, pageSize, promo })
       .then((res) => {
         setCache((prev) => ({ ...prev, [key]: res }));
         if (latestHoldersKeyRef.current !== key) { return; }
         setAchievementResult(res);
-        ensureExactTotal(campusId);
       })
       .catch((err) => {
         if (err.status === 401) { setMe(null); return; }
@@ -580,9 +615,9 @@ const App = () => {
   // "All Morocco": each campus group is its own independent paginated fetch through the same
   // endpoint used for a single selected campus — see the `groupPages`/`groupResults` state
   // above for why.
-  const loadGroupCampus = (campusId, { force = false, page } = {}) => {
+  const loadGroupCampus = (campusId, { force = false, page, promo = globalPromo } = {}) => {
     const p = page ?? groupPages[campusId] ?? 1;
-    const key = `${campusId}:${p}:${globalPageSize}`;
+    const key = `${campusId}:${p}:${globalPageSize}:${promo}`;
 
     if (!force && cache[key]) {
       setGroupResults((prev) => ({ ...prev, [campusId]: cache[key] }));
@@ -591,7 +626,7 @@ const App = () => {
     }
 
     setGroupLoading((prev) => ({ ...prev, [campusId]: true }));
-    fetchAchievementHolders(DEFAULT_ACHIEVEMENT, campusId, { refresh: force, page: p, pageSize: globalPageSize })
+    fetchAchievementHolders(DEFAULT_ACHIEVEMENT, campusId, { refresh: force, page: p, pageSize: globalPageSize, promo })
       .then((res) => {
         setCache((prev) => ({ ...prev, [key]: res }));
         setGroupResults((prev) => ({ ...prev, [campusId]: res }));
@@ -605,13 +640,19 @@ const App = () => {
 
   useEffect(() => {
     if (!me || !selectedCampusId) { return; }
-    loadHolders(selectedCampusId, { page: holdersPage, pageSize: holdersPageSize });
-  }, [me, selectedCampusId, holdersPage, holdersPageSize]);
+    loadHolders(selectedCampusId, { page: holdersPage, pageSize: holdersPageSize, promo: holdersPromo });
+    // For a single selected campus, start the full-scan exact-total request RIGHT AWAY, in
+    // parallel with the paginated page fetch — not queued behind it. Only one campus to scan
+    // here (fast enough to show immediately), unlike "All Morocco" where 4 campuses' worth of
+    // background scans firing at once would be worse, so that view still only starts a
+    // campus's scan once ITS holders have already resolved (see loadGroupCampus's `.then`).
+    ensureExactTotal(Number(selectedCampusId));
+  }, [me, selectedCampusId, holdersPage, holdersPageSize, holdersPromo]);
 
   useEffect(() => {
     if (!me || selectedCampusId || campuses.length === 0) { return; }
-    campuses.forEach((c) => loadGroupCampus(c.id, { page: 1 }));
-  }, [me, selectedCampusId, globalPageSize, campuses]);
+    campuses.forEach((c) => loadGroupCampus(c.id, { page: 1, promo: globalPromo }));
+  }, [me, selectedCampusId, globalPageSize, globalPromo, campuses]);
 
   // Whenever the holders list resolves and it includes Khouribga/Benguerir with real
   // holders, quietly kick off (or reuse the cache of) the per-campus raw Paris-adders scan
@@ -642,21 +683,31 @@ const App = () => {
   useEffect(() => {
     if (!selectedCampusId) { return; }
     const id = Number(selectedCampusId);
-    if (achievementResult?.page === 1 && achievementResult.holders.length === 0) {
+    const pageEmpty = achievementResult?.page === 1 && achievementResult.holders.length === 0;
+    // Same distinction as the grouped view: only a real Paris-adders campus if it
+    // structurally never has holders, or no promo filter is narrowing things down.
+    if (pageEmpty && (NO_ACHIEVEMENT_CAMPUS_IDS.includes(id) || !holdersPromo)) {
       if (!addersLoading[id] && !addersResult[id]) { loadAddersPage(id, { page: 1 }); }
     }
-  }, [achievementResult, selectedCampusId]);
+  }, [achievementResult, selectedCampusId, holdersPromo]);
 
+  // In the grouped "All Morocco" view, the Paris-adders fallback uses the SAME global
+  // Show/Promo controls as the rest of the view (no per-campus controls of its own) — so this
+  // re-fetches whenever those change too, not just when a campus's holders result changes.
   useEffect(() => {
     if (selectedCampusId) { return; }
     Object.entries(groupResults).forEach(([campusIdStr, res]) => {
       const id = Number(campusIdStr);
       const page = groupPages[id] ?? 1;
-      if (page === 1 && (res?.holders?.length ?? 0) === 0) {
-        if (!addersLoading[id] && !addersResult[id]) { loadAddersPage(id, { page: 1 }); }
+      const pageEmpty = page === 1 && (res?.holders?.length ?? 0) === 0;
+      // Only actually a Paris-adders campus if it structurally never has holders — a normal
+      // campus whose page is empty just because the promo filter matched nobody doesn't need
+      // this (different, unrelated) scan at all.
+      if (pageEmpty && NO_ACHIEVEMENT_CAMPUS_IDS.includes(id)) {
+        loadAddersPage(id, { page: 1, pageSize: globalPageSize, promo: globalPromo });
       }
     });
-  }, [groupResults, selectedCampusId]);
+  }, [groupResults, selectedCampusId, globalPageSize, globalPromo]);
 
   // The achievement-gated switchers list is one shared fetch (not per campus) — triggered
   // once whenever there's a holders result to show it alongside, regardless of which
@@ -783,13 +834,13 @@ const App = () => {
             if (refreshesLeft <= 0) { return; }
             setRefreshUses(recordUse(REFRESH_USE_KEY, REFRESH_WINDOW_MS));
             if (selectedCampusId) {
-              loadHolders(selectedCampusId, { force: true, page: holdersPage, pageSize: holdersPageSize });
+              loadHolders(selectedCampusId, { force: true, page: holdersPage, pageSize: holdersPageSize, promo: holdersPromo });
               if (NO_ACHIEVEMENT_CAMPUS_IDS.includes(Number(selectedCampusId))) {
                 loadParisAdders(Number(selectedCampusId), { force: true });
                 loadAddersPage(Number(selectedCampusId), { force: true, page: 1 });
               }
             } else {
-              campuses.forEach((c) => loadGroupCampus(c.id, { force: true, page: groupPages[c.id] ?? 1 }));
+              campuses.forEach((c) => loadGroupCampus(c.id, { force: true, page: groupPages[c.id] ?? 1, promo: globalPromo }));
               NO_ACHIEVEMENT_CAMPUS_IDS.forEach((id) => {
                 loadParisAdders(id, { force: true });
                 loadAddersPage(id, { force: true, page: 1 });
@@ -832,13 +883,22 @@ const App = () => {
                 />
               ) : (
                 <>
-                  {achievementResult.page === 1 && achievementResult.holders.length === 0 ? (
+                  {achievementResult.page === 1 && achievementResult.holders.length === 0 && holdersPromo &&
+                  !NO_ACHIEVEMENT_CAMPUS_IDS.includes(Number(selectedCampusId)) ? (
+                    // A promo filter is active and yielded nothing for THIS filter — not the
+                    // same as the campus having zero holders overall, so don't fall back to
+                    // the Paris-adders view (that fallback is for campuses with no holders at
+                    // all, regardless of promo).
+                    <p className="status-text">No students from promo {holdersPromo} hold this achievement here.</p>
+                  ) : achievementResult.page === 1 && achievementResult.holders.length === 0 ? (
                     <ParisAddersSection
                       campusName={campuses.find((c) => String(c.id) === selectedCampusId)?.name}
                       page={addersPage[Number(selectedCampusId)] ?? 1}
                       pageSize={addersPageSize}
                       result={addersResult[Number(selectedCampusId)]}
                       exactTotal={exactAddersTotals[Number(selectedCampusId)]}
+                      promo={addersPromo[Number(selectedCampusId)] ?? ''}
+                      promoYears={addersPromoYears[Number(selectedCampusId)]}
                       loading={Boolean(addersLoading[Number(selectedCampusId)])}
                       error={addersError[Number(selectedCampusId)]}
                       onPageChange={(p) => {
@@ -849,6 +909,11 @@ const App = () => {
                         setAddersPageSize(size);
                         setAddersPage((prev) => ({ ...prev, [Number(selectedCampusId)]: 1 }));
                         loadAddersPage(Number(selectedCampusId), { page: 1, pageSize: size });
+                      }}
+                      onPromoChange={(year) => {
+                        setAddersPromo((prev) => ({ ...prev, [Number(selectedCampusId)]: year }));
+                        setAddersPage((prev) => ({ ...prev, [Number(selectedCampusId)]: 1 }));
+                        loadAddersPage(Number(selectedCampusId), { page: 1, promo: year });
                       }}
                       onOpenStudent={openHolderDetail}
                     />
@@ -861,12 +926,25 @@ const App = () => {
                           options={PAGE_SIZE_OPTIONS.map((n) => ({ value: n, label: String(n) }))}
                           onChange={(v) => setHoldersPageSize(Number(v))}
                         />
+                        {holdersPromoYears[Number(selectedCampusId)]?.length > 0 && (
+                          <Dropdown
+                            label="Promo"
+                            value={holdersPromo}
+                            options={[
+                              { value: '', label: 'All' },
+                              ...holdersPromoYears[Number(selectedCampusId)].map((y) => ({ value: y, label: String(y) })),
+                            ]}
+                            onChange={(year) => { setHoldersPromo(year); setHoldersPage(1); }}
+                          />
+                        )}
                       </div>
                       <p className="status-text">
-                        {exactTotals[Number(selectedCampusId)] != null
-                          ? `${exactTotals[Number(selectedCampusId)]} student(s)`
-                          : achievementResult.total != null
-                            ? `~${achievementResult.total} student(s)`
+                        {holdersPromo
+                          ? (achievementResult.exactTotal != null
+                              ? `${achievementResult.exactTotal} student(s)`
+                              : `Page ${achievementResult.page}`)
+                          : exactTotals[Number(selectedCampusId)] != null
+                            ? `${exactTotals[Number(selectedCampusId)]} student(s)`
                             : `Page ${achievementResult.page}`} at{' '}
                         {campuses.find((c) => String(c.id) === selectedCampusId)?.name}
                       </p>
@@ -937,6 +1015,23 @@ const App = () => {
                     options={PAGE_SIZE_OPTIONS.map((n) => ({ value: n, label: String(n) }))}
                     onChange={(v) => setGlobalPageSize(Number(v))}
                   />
+                  {(() => {
+                    const allPromoYears = [...new Set(campuses.flatMap((c) => holdersPromoYears[c.id] || []))]
+                      .sort()
+                      .reverse();
+                    return allPromoYears.length > 0 && (
+                      <Dropdown
+                        label="Promo"
+                        value={globalPromo}
+                        options={[{ value: '', label: 'All' }, ...allPromoYears.map((y) => ({ value: y, label: String(y) }))]}
+                        onChange={(year) => {
+                          setGlobalPromo(year);
+                          setGroupPages({});
+                          setAddersPage({});
+                        }}
+                      />
+                    );
+                  })()}
                 </div>
                 {/* "All Morocco": one section per campus, each independently paginated
                     through the same backend-paginated endpoint as a single selected campus. */}
@@ -945,6 +1040,14 @@ const App = () => {
                   const loading = Boolean(groupLoading[c.id]);
                   const page = groupPages[c.id] ?? 1;
                   const holders = res?.holders || [];
+                  const pageEmpty = page === 1 && holders.length === 0;
+                  // A campus with zero holders ALWAYS falls back to the Paris-adders view
+                  // (regardless of promo — Tétouan/Rabat structurally never have holders). A
+                  // normal campus whose page came back empty only because the promo filter
+                  // matched nobody is a different case: show "no match" instead of switching
+                  // to an entirely different dataset.
+                  const isAddersFallback = pageEmpty && (NO_ACHIEVEMENT_CAMPUS_IDS.includes(c.id) || !globalPromo);
+                  const isPromoEmpty = pageEmpty && !isAddersFallback;
                   return (
                     <div key={c.id} className="campus-group">
                       <h2 className="section-heading">
@@ -953,35 +1056,30 @@ const App = () => {
                             campus with zero holders falls back to the Paris-adders list
                             instead (a different dataset), so its own total is shown there,
                             not the (misleading) achievement-holders one. */}
-                        {page === 1 && holders.length === 0
+                        {isAddersFallback
                           ? (exactAddersTotals[c.id] != null ? ` (${exactAddersTotals[c.id]})` : '')
-                          : (exactTotals[c.id] != null
-                              ? ` (${exactTotals[c.id]})`
-                              : res?.total != null
-                                ? ` (~${res.total})`
-                                : '')}
+                          : (exactTotals[c.id] != null ? ` (${exactTotals[c.id]})` : '')}
                       </h2>
                       {loading && holders.length === 0 ? (
                         <SkeletonGrid />
-                      ) : page === 1 && holders.length === 0 ? (
+                      ) : isPromoEmpty ? (
+                        <p className="status-text">No students from promo {globalPromo} hold this achievement here.</p>
+                      ) : isAddersFallback ? (
                         <ParisAddersSection
                           campusName={c.name}
                           showCount={false}
+                          hideControls
                           page={addersPage[c.id] ?? 1}
-                          pageSize={addersPageSize}
+                          pageSize={globalPageSize}
                           result={addersResult[c.id]}
                           exactTotal={exactAddersTotals[c.id]}
-                          loading={Boolean(addersLoading[c.id])}
-                          error={addersError[c.id]}
+                          promo={globalPromo}
                           onPageChange={(p) => {
                             setAddersPage((prev) => ({ ...prev, [c.id]: p }));
-                            loadAddersPage(c.id, { page: p });
+                            loadAddersPage(c.id, { page: p, pageSize: globalPageSize, promo: globalPromo });
                           }}
-                          onPageSizeChange={(size) => {
-                            setAddersPageSize(size);
-                            setAddersPage((prev) => ({ ...prev, [c.id]: 1 }));
-                            loadAddersPage(c.id, { page: 1, pageSize: size });
-                          }}
+                          loading={Boolean(addersLoading[c.id])}
+                          error={addersError[c.id]}
                           onOpenStudent={openHolderDetail}
                         />
                       ) : (

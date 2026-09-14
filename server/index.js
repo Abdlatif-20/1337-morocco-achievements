@@ -19,18 +19,41 @@ const TOKEN_URL = 'https://api.intra.42.fr/oauth/token';
 
 // 42's API rate-limits at ~2 req/s — every outgoing call is chained through this queue so
 // concurrent requests from the frontend don't burst past that limit.
+//
+// Two priority lanes, not one FIFO: a background full-scan (the exact-total request, or a
+// Paris-adders roster scan) can need dozens of throttled calls. On a single shared queue,
+// switching to a different campus mid-scan still has to wait behind whatever's left of that
+// scan before its own (small, fast) page request gets a turn — visibly "stuck" even though
+// the visitor no longer cares about the old campus. High-priority calls always cut ahead of
+// queued low-priority ones (low-priority work already in flight still finishes normally,
+// only future picks get reordered), while the total dispatch rate stays capped at the same
+// MIN_INTERVAL_MS regardless of which lane it comes from — this reorders, it doesn't add
+// throughput, so it can't push us over 42's real limit.
 const MIN_INTERVAL_MS = 550;
-let queue = Promise.resolve();
+const highQueue = [];
+const lowQueue = [];
+let dispatching = false;
 let lastDispatch = 0;
 
-const throttle = () => {
-  const dispatch = queue.then(async () => {
-    const wait = Math.max(0, lastDispatch + MIN_INTERVAL_MS - Date.now());
-    if (wait > 0) { await new Promise((r) => setTimeout(r, wait)); }
+const pump = () => {
+  if (dispatching) { return; }
+  const next = highQueue.shift() || lowQueue.shift();
+  if (!next) { return; }
+  dispatching = true;
+  const wait = Math.max(0, lastDispatch + MIN_INTERVAL_MS - Date.now());
+  setTimeout(() => {
     lastDispatch = Date.now();
+    dispatching = false;
+    next.resolve();
+    pump();
+  }, wait);
+};
+
+const throttle = (priority = 'high') => {
+  return new Promise((resolve) => {
+    (priority === 'low' ? lowQueue : highQueue).push({ resolve });
+    pump();
   });
-  queue = dispatch;
-  return dispatch;
 };
 
 // Holds the CURRENT VISITOR's own access token for the duration of one request. Every data
@@ -42,8 +65,8 @@ const throttle = () => {
 // data be fetched using each visitor's own 42 account, not the app owner's.
 const requestContext = new AsyncLocalStorage();
 
-const apiGetOnce = async (path, tokenOverride) => {
-  await throttle();
+const apiGetOnce = async (path, tokenOverride, priority = 'high') => {
+  await throttle(priority);
   const token = tokenOverride || requestContext.getStore()?.token;
   if (!token) { const err = new Error('NO_REQUEST_TOKEN'); err.status = 401; throw err; }
 
@@ -90,9 +113,9 @@ const apiGetOnce = async (path, tokenOverride) => {
 // are never retried at all.
 const MAX_AUTO_RETRY_WAIT_SECONDS = 10;
 
-const apiGet = async (path, tokenOverride) => {
+const apiGet = async (path, tokenOverride, priority = 'high') => {
   try {
-    return await apiGetOnce(path, tokenOverride);
+    return await apiGetOnce(path, tokenOverride, priority);
   } catch (err) {
     const isTransient = !err.status || err.status === 429 || err.status >= 500;
     if (!isTransient) { throw err; }
@@ -101,7 +124,7 @@ const apiGet = async (path, tokenOverride) => {
       throw err;
     }
     await new Promise((r) => setTimeout(r, (err.retryAfterSeconds ?? (err.status === 429 ? 3 : 1.5)) * 1000));
-    return apiGetOnce(path, tokenOverride);
+    return apiGetOnce(path, tokenOverride, priority);
   }
 };
 
@@ -194,11 +217,11 @@ const fetchFullProfile = async (login) => {
   return normalizeFullProfile(user, coalitions);
 };
 
-const fetchAllPages = async (path, { maxPages = 6, pageSize = 100, tokenOverride } = {}) => {
+const fetchAllPages = async (path, { maxPages = 6, pageSize = 100, tokenOverride, priority = 'high' } = {}) => {
   const results = [];
   for (let pageNum = 1; pageNum <= maxPages; pageNum += 1) {
     const sep = path.includes('?') ? '&' : '?';
-    const { data } = await apiGet(`${path}${sep}page[size]=${pageSize}&page[number]=${pageNum}`, tokenOverride);
+    const { data } = await apiGet(`${path}${sep}page[size]=${pageSize}&page[number]=${pageNum}`, tokenOverride, priority);
     if (!Array.isArray(data) || data.length === 0) { break; }
     results.push(...data);
     if (data.length < pageSize) { break; }
@@ -379,7 +402,7 @@ const parisAddersCache = new Map(); // campusId -> { rosterPage, rosterExhausted
 // requested page/size, instead of scanning a campus's entire roster (up to 3800+ students)
 // before returning anything. The cache entry holds progress made so far, so a deeper
 // page/larger size just fetches the additional roster pages needed and extends it.
-const getParisAddersPage = async (campusId, { force = false, page = 1, pageSize = 10 } = {}) => {
+const getParisAddersPage = async (campusId, { force = false, page = 1, pageSize = 10, promo = null } = {}) => {
   let entry = !force && parisAddersCache.get(campusId);
   if (!entry || Date.now() - entry.cachedAt >= PARIS_ADDERS_CACHE_TTL_MS) {
     entry = { rosterPage: 0, rosterExhausted: false, adders: [], cachedAt: Date.now() };
@@ -387,12 +410,18 @@ const getParisAddersPage = async (campusId, { force = false, page = 1, pageSize 
 
   const token = await getAppToken();
   const neededCount = page * pageSize;
+  // A huge pageSize (see ensureExactAddersTotal / getParisAdders in App.jsx) means this is a
+  // background full-scan, not a visible page the visitor is waiting on — let foreground
+  // requests (a normal small page, from this campus or any other) cut ahead of it in the
+  // shared throttle queue instead of queuing behind however much of this scan is left.
+  const priority = pageSize > 1000 ? 'low' : 'high';
 
   while (entry.adders.length < neededCount && !entry.rosterExhausted && entry.rosterPage < ROSTER_MAX_PAGES) {
     const nextPage = entry.rosterPage + 1;
     const { data: rosterChunk } = await apiGet(
       `/campus/${campusId}/users?page[size]=100&page[number]=${nextPage}`,
       token,
+      priority,
     );
     entry.rosterPage = nextPage;
     if (!Array.isArray(rosterChunk) || rosterChunk.length === 0) { entry.rosterExhausted = true; break; }
@@ -402,7 +431,7 @@ const getParisAddersPage = async (campusId, { force = false, page = 1, pageSize 
       const byId = new Map(candidates.map((u) => [u.id, u]));
       const rows = await fetchAllPages(
         `/campus_users?filter[user_id]=${candidates.map((u) => u.id).join(',')}`,
-        { maxPages: 3, tokenOverride: token },
+        { maxPages: 3, tokenOverride: token, priority },
       );
       for (const row of rows) {
         if (row.campus_id !== PARIS_CAMPUS_ID) { continue; }
@@ -415,12 +444,16 @@ const getParisAddersPage = async (campusId, { force = false, page = 1, pageSize 
   }
   parisAddersCache.set(campusId, entry);
 
-  const adders = entry.adders.slice((page - 1) * pageSize, page * pageSize);
-  const hasMore = entry.adders.length > page * pageSize || !entry.rosterExhausted;
+  const promoFiltered = promo ? entry.adders.filter((a) => String(a.poolYear) === String(promo)) : entry.adders;
+  const adders = promoFiltered.slice((page - 1) * pageSize, page * pageSize);
+  const hasMore = promoFiltered.length > page * pageSize || !entry.rosterExhausted;
   // Only known once the whole roster's been scanned — null until then, same pattern as
-  // achievement holders' exactTotal.
-  const exactTotal = entry.rosterExhausted ? entry.adders.length : null;
-  return { adders, hasMore, exactTotal };
+  // achievement holders' exactTotal/promoYears.
+  const exactTotal = entry.rosterExhausted ? promoFiltered.length : null;
+  const promoYears = entry.rosterExhausted
+    ? [...new Set(entry.adders.map((a) => a.poolYear).filter(Boolean))].sort().reverse()
+    : null;
+  return { adders, hasMore, exactTotal, promoYears };
 };
 
 // Callers that need the FULL list, not one page (the boot-time prewarm below) — an
@@ -762,6 +795,11 @@ app.get('/api/achievements/holders', requireAuth, async (req, res) => {
       const page = Math.max(1, Number(req.query.page) || 1);
       const pageSize = Math.max(1, Number(req.query.pageSize) || 10);
       const neededCount = page * pageSize;
+      // A huge pageSize (see ensureExactTotal in App.jsx) means this is a background
+      // full-scan, not a visible page the visitor is waiting on — let foreground requests
+      // (a normal small page, from this campus or any other) cut ahead of it in the shared
+      // throttle queue instead of queuing behind however much of this scan is left.
+      const priority = pageSize > 1000 ? 'low' : 'high';
 
       let entry = !bypassCache && achievementHoldersCache.get(cacheKey);
       if (!entry || Date.now() - entry.cachedAt >= ACHIEVEMENT_HOLDERS_CACHE_TTL_MS) {
@@ -777,6 +815,8 @@ app.get('/api/achievements/holders', requireAuth, async (req, res) => {
         const nextPage = entry.upstreamPage + 1;
         const { data: rawPage, total } = await apiGet(
           `/achievements/${achievement.id}/users?filter[primary_campus_id]=${requestedCampusId}&page[size]=100&page[number]=${nextPage}`,
+          undefined,
+          priority,
         );
         // 42 reports the RAW total via the x-total header — free on every request, no extra
         // call needed — but it's the count before our staff/this-year filtering, so it can
@@ -793,14 +833,23 @@ app.get('/api/achievements/holders', requireAuth, async (req, res) => {
       achievementHoldersCache.set(cacheKey, entry);
 
       const allFiltered = filterHolders(entry.rawHolders);
-      const holders = allFiltered.slice((page - 1) * pageSize, page * pageSize);
-      const hasMore = allFiltered.length > page * pageSize || !entry.exhausted;
-      // Only known once the roster's been scanned all the way through (entry.exhausted) —
-      // null until then. `total` (the raw x-total header) is available immediately as a
+      // Optional promo-year filter, applied server-side (after our own staff/this-year
+      // filter) so a selected year filters the actual paginated results — the dropdown's
+      // options come from `promoYears` below, only meaningful once the whole campus has been
+      // scanned, same as exactTotal.
+      const promo = req.query.promo ? String(req.query.promo) : null;
+      const promoFiltered = promo ? allFiltered.filter((h) => String(h.poolYear) === promo) : allFiltered;
+      const holders = promoFiltered.slice((page - 1) * pageSize, page * pageSize);
+      const hasMore = promoFiltered.length > page * pageSize || !entry.exhausted;
+      // Both only known once the roster's been scanned all the way through (entry.exhausted)
+      // — null until then. `total` (the raw x-total header) is available immediately as a
       // rough stand-in; the client shows that first and swaps in this exact count once a
       // background full-scan request (see fetchAchievementHolders in api.js) completes.
-      const exactTotal = entry.exhausted ? allFiltered.length : null;
-      return res.json({ achievement, holders, page, pageSize, hasMore, total: entry.total, exactTotal });
+      const exactTotal = entry.exhausted ? promoFiltered.length : null;
+      const promoYears = entry.exhausted
+        ? [...new Set(allFiltered.map((h) => h.poolYear).filter(Boolean))].sort().reverse()
+        : null;
+      return res.json({ achievement, holders, page, pageSize, hasMore, total: entry.total, exactTotal, promoYears });
     }
 
     // "All Morocco": the holder objects carry no campus field at all (verified live), so the
@@ -839,19 +888,21 @@ app.get('/api/campuses/:campusId/paris-adders', requireAuth, async (req, res) =>
     return res.status(400).json({ error: 'INVALID_CAMPUS' });
   }
   if (campusId === RABAT_CAMPUS_ID) {
-    return res.json({ adders: [], ready: true, page: 1, pageSize: 10, hasMore: false, exactTotal: 0 });
+    return res.json({ adders: [], ready: true, page: 1, pageSize: 10, hasMore: false, exactTotal: 0, promoYears: [] });
   }
 
   const page = Math.max(1, Number(req.query.page) || 1);
   const pageSize = Math.max(1, Number(req.query.pageSize) || 10);
+  const promo = req.query.promo ? String(req.query.promo) : null;
 
   try {
-    const { adders, hasMore, exactTotal } = await getParisAddersPage(campusId, {
+    const { adders, hasMore, exactTotal, promoYears } = await getParisAddersPage(campusId, {
       force: req.query.refresh === '1',
       page,
       pageSize,
+      promo,
     });
-    res.json({ adders, ready: true, page, pageSize, hasMore, exactTotal });
+    res.json({ adders, ready: true, page, pageSize, hasMore, exactTotal, promoYears });
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });
   }
