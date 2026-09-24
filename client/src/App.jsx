@@ -302,37 +302,73 @@ const ParisAddersSection = ({ campusName, showCount = true, hideControls = false
   );
 };
 
-// Shown under Khouribga/Benguerir's achievement holders (whether or not that list itself has
-// results) — students the API's filter[primary_campus_id] can no longer see (their primary
-// campus is now Paris) but who genuinely made that switch recently. The parent already
-// triggers the background Paris-adders fetch this reads from (same one powering the ✈️
-// badge), so this never fires its own network request.
-const RecentParisSwitchersSection = ({ students, loading, campusId, onOpenStudent }) => {
+// Shown under each campus's achievement holders — students the API's
+// filter[primary_campus_id] can no longer see (their primary campus is now Paris) but who
+// genuinely made that switch recently. Paginated server-side: Show/Prev/Next each trigger a
+// real request for the matching slice, same pattern as ParisAddersSection.
+const RecentParisSwitchersSection = ({
+  campusId,
+  result,
+  total,
+  page,
+  pageSize,
+  loading,
+  onPageChange,
+  onPageSizeChange,
+  onOpenStudent,
+}) => {
   // Rabat has zero students full stop, verified live (see server/index.js) — no point
   // showing a "checking…" spinner for a campus that structurally can never have a switcher.
   const effectiveLoading = campusId === RABAT_CAMPUS_ID ? false : loading;
+  const students = result?.switchers || [];
+
   if (effectiveLoading && students.length === 0) {
     return (
-      <>
+      <div className="campus-group">
+        <h2 className="section-heading">✈️ Recently switched to Paris Campus</h2>
         <p className="status-text">Checking for students who recently switched to Paris Campus…</p>
         <SkeletonGrid count={3} />
-      </>
+      </div>
     );
   }
+
   const sorted = [...students].sort((a, b) => a.displayName.localeCompare(b.displayName));
+  const knownTotal = total ?? result?.total ?? null;
+
   return (
     <div className="campus-group">
-      <h2 className="section-heading">✈️ Recently switched to Paris Campus ({sorted.length})</h2>
-      {sorted.length === 0 ? (
+      <h2 className="section-heading">
+        ✈️ Recently switched to Paris Campus{knownTotal != null ? ` (${knownTotal})` : ''}
+      </h2>
+      {page === 1 && sorted.length === 0 && !effectiveLoading ? (
         <p className="status-text">
           No students here have switched their primary campus to 42 Paris since August.
         </p>
       ) : (
-        <div className="student-grid">
-          {sorted.map((s) => (
-            <LazyCard key={s.id} student={s} onOpen={() => onOpenStudent(s)} />
-          ))}
-        </div>
+        <>
+          <div className="filters-row grid-controls">
+            <Dropdown
+              label="Show"
+              value={pageSize}
+              options={PAGE_SIZE_OPTIONS.map((n) => ({ value: n, label: String(n) }))}
+              onChange={(v) => onPageSizeChange(Number(v))}
+            />
+          </div>
+          <div className="student-grid">
+            {sorted.map((s) => (
+              <LazyCard key={s.id} student={s} onOpen={() => onOpenStudent(s)} />
+            ))}
+          </div>
+          <div className="pagination">
+            <button type="button" onClick={() => onPageChange(Math.max(1, page - 1))} disabled={page === 1 || effectiveLoading}>
+              ← Prev
+            </button>
+            <span>Page {page}</span>
+            <button type="button" onClick={() => onPageChange(page + 1)} disabled={!result?.hasMore || effectiveLoading}>
+              Next →
+            </button>
+          </div>
+        </>
       )}
     </div>
   );
@@ -524,28 +560,50 @@ const App = () => {
   // this-year holders only (a few hundred, worldwide), NOT a full campus roster scan, so it's
   // one shared fetch for every campus instead of one scan per campus — each result already
   // carries its own `campusId` (the Moroccan campus it's grouped under).
-  const [switchers, setSwitchers] = useState(() => readCache('parisSwitchers', PARIS_CACHE_TTL_MS) || []);
-  const [switchersReady, setSwitchersReady] = useState(switchers.length > 0);
-  const [switchersLoading, setSwitchersLoading] = useState(false);
+  // Per-campus paginated switchers — { [campusId]: { switchers, hasMore, total } }
+  // Each campus's section fetches its own pages independently.
+  const [switchersResults, setSwitchersResults] = useState({});
+  const [switchersPage, setSwitchersPage] = useState({}); // campusId -> page
+  const [switchersPageSize, setSwitchersPageSize] = useState(PAGE_SIZE_OPTIONS[0]);
+  const [switchersLoading, setSwitchersLoading] = useState({}); // campusId -> bool
+  // Grand total per campus (known once at least one page resolves) — used for section heading.
+  const [switchersTotals, setSwitchersTotals] = useState({});
 
-  useEffect(() => {
-    if (switchersReady) { writeCache('parisSwitchers', switchers); }
-  }, [switchers, switchersReady]);
+  // Reset switchers pages whenever the campus or page size changes.
+  useEffect(() => { setSwitchersPage({}); }, [selectedCampusId, switchersPageSize]);
 
-  const loadParisSwitchers = ({ force = false } = {}) => {
-    if (!force && switchersReady) { return; }
-    if (switchersLoading) { return; }
-
-    setSwitchersLoading(true);
-    fetchAchievementParisSwitchers(DEFAULT_ACHIEVEMENT, { refresh: force })
+  const loadSwitchersPage = (campusId, { force = false, page, pageSize } = {}) => {
+    const p = page ?? switchersPage[campusId] ?? 1;
+    const size = pageSize ?? switchersPageSize;
+    if (switchersLoading[campusId]) { return; }
+    setSwitchersLoading((prev) => ({ ...prev, [campusId]: true }));
+    fetchAchievementParisSwitchers(DEFAULT_ACHIEVEMENT, { refresh: force, campusId, page: p, pageSize: size })
       .then((res) => {
-        setSwitchers(res.switchers);
-        setSwitchersReady(true);
+        setSwitchersResults((prev) => ({ ...prev, [campusId]: res }));
+        // Keep the known total stable across page changes (total is per-campus full count).
+        if (res.total != null) {
+          setSwitchersTotals((prev) => ({ ...prev, [campusId]: res.total }));
+        }
       })
       .catch((err) => {
-        if (err.status === 401) { setMe(null); return; }
+        if (err.status === 401) { setMe(null); }
       })
-      .finally(() => setSwitchersLoading(false));
+      .finally(() => setSwitchersLoading((prev) => ({ ...prev, [campusId]: false })));
+  };
+
+  // Compat shim used by the refresh button — refreshes the current visible page for every
+  // campus that has been fetched, not a full-list reload (that's the old pre-pagination model).
+  const loadParisSwitchers = ({ force = false } = {}) => {
+    const campusesToRefresh = Object.keys(switchersResults).map(Number);
+    if (campusesToRefresh.length === 0) {
+      // Nothing loaded yet — trigger page 1 for visible campuses.
+      const visibleIds = selectedCampusId ? [Number(selectedCampusId)] : campuses.map((c) => c.id);
+      visibleIds.forEach((id) => loadSwitchersPage(id, { force, page: 1 }));
+    } else {
+      campusesToRefresh.forEach((id) => {
+        loadSwitchersPage(id, { force, page: switchersPage[id] ?? 1 });
+      });
+    }
   };
 
   // Guards against out-of-order responses: switching from "All Morocco" to a specific campus
@@ -709,12 +767,22 @@ const App = () => {
     });
   }, [groupResults, selectedCampusId, globalPageSize, globalPromo]);
 
-  // The achievement-gated switchers list is one shared fetch (not per campus) — triggered
-  // once whenever there's a holders result to show it alongside, regardless of which
-  // Moroccan campus(es) that result covers.
+  // Trigger the switchers page-1 fetch for each campus that has a holders/adders result —
+  // one fetch per campus (scoped), rather than one shared worldwide fetch.
   useEffect(() => {
     if (!achievementResult && Object.keys(groupResults).length === 0) { return; }
-    loadParisSwitchers();
+    if (selectedCampusId) {
+      const id = Number(selectedCampusId);
+      if (!switchersResults[id] && !switchersLoading[id]) {
+        loadSwitchersPage(id, { page: 1 });
+      }
+    } else {
+      campuses.forEach((c) => {
+        if (!switchersResults[c.id] && !switchersLoading[c.id]) {
+          loadSwitchersPage(c.id, { page: 1 });
+        }
+      });
+    }
   }, [achievementResult, groupResults]);
 
   // null when the student isn't a recent Paris-adder for this campus, otherwise the date
@@ -734,7 +802,9 @@ const App = () => {
   // while, duplicating them against the "Recently switched to 42 Paris" section below. Drop
   // anyone already accounted for there, since we already have that data loaded.
   const excludeSwitchers = (campusId, holders) => {
-    const switcherLogins = new Set(switchers.filter((s) => s.campusId === campusId).map((s) => s.login));
+    const switcherLogins = new Set(
+      (switchersResults[campusId]?.switchers || []).map((s) => s.login),
+    );
     return holders.filter((h) => !switcherLogins.has(h.login));
   };
 
@@ -876,9 +946,21 @@ const App = () => {
                 // only the "recently switched" section(s) — same underlying data, already
                 // fetched either way, just a display filter.
                 <RecentParisSwitchersSection
-                  students={switchers.filter((s) => s.campusId === Number(selectedCampusId))}
-                  loading={switchersLoading}
                   campusId={Number(selectedCampusId)}
+                  result={switchersResults[Number(selectedCampusId)]}
+                  total={switchersTotals[Number(selectedCampusId)]}
+                  page={switchersPage[Number(selectedCampusId)] ?? 1}
+                  pageSize={switchersPageSize}
+                  loading={Boolean(switchersLoading[Number(selectedCampusId)])}
+                  onPageChange={(p) => {
+                    setSwitchersPage((prev) => ({ ...prev, [Number(selectedCampusId)]: p }));
+                    loadSwitchersPage(Number(selectedCampusId), { page: p });
+                  }}
+                  onPageSizeChange={(size) => {
+                    setSwitchersPageSize(size);
+                    setSwitchersPage((prev) => ({ ...prev, [Number(selectedCampusId)]: 1 }));
+                    loadSwitchersPage(Number(selectedCampusId), { page: 1, pageSize: size });
+                  }}
                   onOpenStudent={openHolderDetail}
                 />
               ) : (
@@ -976,9 +1058,21 @@ const App = () => {
                     </>
                   )}
                   <RecentParisSwitchersSection
-                    students={switchers.filter((s) => s.campusId === Number(selectedCampusId))}
-                    loading={switchersLoading}
                     campusId={Number(selectedCampusId)}
+                    result={switchersResults[Number(selectedCampusId)]}
+                    total={switchersTotals[Number(selectedCampusId)]}
+                    page={switchersPage[Number(selectedCampusId)] ?? 1}
+                    pageSize={switchersPageSize}
+                    loading={Boolean(switchersLoading[Number(selectedCampusId)])}
+                    onPageChange={(p) => {
+                      setSwitchersPage((prev) => ({ ...prev, [Number(selectedCampusId)]: p }));
+                      loadSwitchersPage(Number(selectedCampusId), { page: p });
+                    }}
+                    onPageSizeChange={(size) => {
+                      setSwitchersPageSize(size);
+                      setSwitchersPage((prev) => ({ ...prev, [Number(selectedCampusId)]: 1 }));
+                      loadSwitchersPage(Number(selectedCampusId), { page: 1, pageSize: size });
+                    }}
                     onOpenStudent={openHolderDetail}
                   />
                 </>
@@ -994,9 +1088,21 @@ const App = () => {
                 <div key={c.id} className="campus-group">
                   <h2 className="section-heading">{c.name}</h2>
                   <RecentParisSwitchersSection
-                    students={switchers.filter((s) => s.campusId === c.id)}
-                    loading={switchersLoading}
                     campusId={c.id}
+                    result={switchersResults[c.id]}
+                    total={switchersTotals[c.id]}
+                    page={switchersPage[c.id] ?? 1}
+                    pageSize={switchersPageSize}
+                    loading={Boolean(switchersLoading[c.id])}
+                    onPageChange={(p) => {
+                      setSwitchersPage((prev) => ({ ...prev, [c.id]: p }));
+                      loadSwitchersPage(c.id, { page: p });
+                    }}
+                    onPageSizeChange={(size) => {
+                      setSwitchersPageSize(size);
+                      setSwitchersPage((prev) => ({ ...prev, [c.id]: 1 }));
+                      loadSwitchersPage(c.id, { page: 1, pageSize: size });
+                    }}
                     onOpenStudent={openHolderDetail}
                   />
                 </div>
@@ -1117,9 +1223,21 @@ const App = () => {
                         </>
                       )}
                       <RecentParisSwitchersSection
-                        students={switchers.filter((s) => s.campusId === c.id)}
-                        loading={switchersLoading}
                         campusId={c.id}
+                        result={switchersResults[c.id]}
+                        total={switchersTotals[c.id]}
+                        page={switchersPage[c.id] ?? 1}
+                        pageSize={switchersPageSize}
+                        loading={Boolean(switchersLoading[c.id])}
+                        onPageChange={(p) => {
+                          setSwitchersPage((prev) => ({ ...prev, [c.id]: p }));
+                          loadSwitchersPage(c.id, { page: p });
+                        }}
+                        onPageSizeChange={(size) => {
+                          setSwitchersPageSize(size);
+                          setSwitchersPage((prev) => ({ ...prev, [c.id]: 1 }));
+                          loadSwitchersPage(c.id, { page: 1, pageSize: size });
+                        }}
                         onOpenStudent={openHolderDetail}
                       />
                     </div>

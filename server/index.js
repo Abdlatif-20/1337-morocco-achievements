@@ -1000,11 +1000,24 @@ app.get('/api/achievements/paris-switchers', requireAuth, async (req, res) => {
   const name = String(req.query.name || '').trim();
   if (!name) { return res.status(400).json({ error: 'EMPTY_NAME' }); }
 
+  // Optional campus scoping — when provided, only switchers from that Moroccan campus are
+  // returned (still one shared worldwide fetch, just filtered before slicing).
+  const campusId = req.query.campus ? Number(req.query.campus) : null;
+  const page = Math.max(1, Number(req.query.page) || 1);
+  const pageSize = Math.max(1, Number(req.query.pageSize) || 10);
+
   try {
     const achievement = await findAchievementByName(name);
     if (!achievement) { return res.status(404).json({ error: 'ACHIEVEMENT_NOT_FOUND' }); }
-    const switchers = await getAchievementParisSwitchers(achievement.id, { bypassCache: req.query.refresh === '1' });
-    res.json({ switchers, ready: true });
+    const allSwitchers = await getAchievementParisSwitchers(achievement.id, { bypassCache: req.query.refresh === '1' });
+
+    // Filter by campus when requested (e.g. single-campus view), otherwise return all.
+    const scoped = campusId != null ? allSwitchers.filter((s) => s.campusId === campusId) : allSwitchers;
+    const total = scoped.length;
+    const switchers = scoped.slice((page - 1) * pageSize, page * pageSize);
+    const hasMore = total > page * pageSize;
+
+    res.json({ switchers, ready: true, page, pageSize, hasMore, total });
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });
   }

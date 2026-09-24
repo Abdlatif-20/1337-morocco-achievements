@@ -54,9 +54,12 @@ export const fetchCampusParisAdders = (campusId, { refresh = false, page, pageSi
 // primary campus). One call for the whole achievement — scoped to this-year holders only
 // (not a full campus roster scan) — each result tagged with `campusId`, the Moroccan campus
 // they're originally from, so the client can bucket them into the right section.
-export const fetchAchievementParisSwitchers = (name, { refresh = false } = {}) =>
+export const fetchAchievementParisSwitchers = (name, { refresh = false, page, pageSize, campusId } = {}) =>
   request(
     `/api/achievements/paris-switchers?name=${encodeURIComponent(name)}` +
+      (campusId != null ? `&campus=${campusId}` : '') +
+      (page ? `&page=${page}` : '') +
+      (pageSize ? `&pageSize=${pageSize}` : '') +
       (refresh ? '&refresh=1' : ''),
   );
 
