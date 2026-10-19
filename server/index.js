@@ -17,16 +17,6 @@ const API_BASE = 'https://api.intra.42.fr/v2';
 const AUTHORIZE_URL = 'https://api.intra.42.fr/oauth/authorize';
 const TOKEN_URL = 'https://api.intra.42.fr/oauth/token';
 
-// Node's default fetch sends a bare/absent User-Agent, which Cloudflare's bot management
-// (sitting in front of api.intra.42.fr) reliably challenges from datacenter IP ranges like
-// Vercel's — verified live: every outgoing request from prod got a 403 "Just a moment..."
-// Cloudflare challenge page back instead of a real response, never a real 42 API error. A
-// normal browser-like User-Agent avoids that classification.
-const OUTGOING_HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
-  Accept: 'application/json',
-};
-
 // 42's API rate-limits at ~2 req/s — every outgoing call is chained through this queue so
 // concurrent requests from the frontend don't burst past that limit.
 //
@@ -81,7 +71,7 @@ const apiGetOnce = async (path, tokenOverride, priority = 'high') => {
   if (!token) { const err = new Error('NO_REQUEST_TOKEN'); err.status = 401; throw err; }
 
   const response = await fetch(`${API_BASE}${path}`, {
-    headers: { ...OUTGOING_HEADERS, Authorization: `Bearer ${token}` },
+    headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
   });
   const total = response.headers.get('x-total');
   // On a 429, 42's API tells us the REAL cooldown via Retry-After — verified live this can
@@ -366,7 +356,7 @@ const getAppToken = async () => {
   });
   const response = await fetch(TOKEN_URL, {
     method: 'POST',
-    headers: { ...OUTGOING_HEADERS, 'Content-Type': 'application/x-www-form-urlencoded' },
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body,
   });
   if (!response.ok) { throw new Error('APP_TOKEN_FAILED'); }
@@ -506,7 +496,7 @@ const exchangeCodeForToken = async (code, redirectUri) => {
   });
   const response = await fetch(TOKEN_URL, {
     method: 'POST',
-    headers: { ...OUTGOING_HEADERS, 'Content-Type': 'application/x-www-form-urlencoded' },
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body,
   });
   if (!response.ok) {
@@ -525,7 +515,7 @@ const refreshAccessToken = async (refreshToken) => {
   });
   const response = await fetch(TOKEN_URL, {
     method: 'POST',
-    headers: { ...OUTGOING_HEADERS, 'Content-Type': 'application/x-www-form-urlencoded' },
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body,
   });
   if (!response.ok) { throw new Error('REFRESH_FAILED'); }
@@ -540,7 +530,7 @@ const refreshAccessToken = async (refreshToken) => {
 const fetchMe = async (accessToken) => {
   await throttle();
   const response = await fetch(`${API_BASE}/me`, {
-    headers: { ...OUTGOING_HEADERS, Authorization: `Bearer ${accessToken}` },
+    headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' },
   });
   if (response.ok) { return response.json(); }
 
@@ -550,7 +540,7 @@ const fetchMe = async (accessToken) => {
       await new Promise((r) => setTimeout(r, retryAfterSeconds * 1000));
       await throttle();
       const retryResponse = await fetch(`${API_BASE}/me`, {
-        headers: { ...OUTGOING_HEADERS, Authorization: `Bearer ${accessToken}` },
+        headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' },
       });
       if (retryResponse.ok) { return retryResponse.json(); }
       const body = await retryResponse.text().catch(() => '');
