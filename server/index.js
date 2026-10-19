@@ -2,7 +2,6 @@ import 'dotenv/config';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import express from 'express';
 import cors from 'cors';
-import { ProxyAgent } from 'undici';
 import { MOROCCAN_CAMPUSES } from './campuses.js';
 import {
   getSession,
@@ -27,16 +26,6 @@ const OUTGOING_HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
   Accept: 'application/json',
 };
-
-// The User-Agent above alone doesn't get past Cloudflare in front of api.intra.42.fr —
-// verified live: Vercel's egress IPs get Cloudflare's "Just a moment..." challenge page
-// (403) on every request, while the exact same request from a non-Vercel IP gets a real
-// response. Cloudflare is blocking by IP/ASN reputation, not request shape, so the only fix
-// is routing these calls through a different egress IP — a static-IP outbound proxy
-// (QuotaGuard Static, Fixie, etc). Set OUTBOUND_PROXY_URL to enable; unset == no proxy
-// (local dev, or once/if the Vercel IP range stops being blocked).
-const proxyAgent = process.env.OUTBOUND_PROXY_URL ? new ProxyAgent(process.env.OUTBOUND_PROXY_URL) : null;
-const withProxy = (options) => (proxyAgent ? { ...options, dispatcher: proxyAgent } : options);
 
 // 42's API rate-limits at ~2 req/s — every outgoing call is chained through this queue so
 // concurrent requests from the frontend don't burst past that limit.
@@ -91,9 +80,9 @@ const apiGetOnce = async (path, tokenOverride, priority = 'high') => {
   const token = tokenOverride || requestContext.getStore()?.token;
   if (!token) { const err = new Error('NO_REQUEST_TOKEN'); err.status = 401; throw err; }
 
-  const response = await fetch(`${API_BASE}${path}`, withProxy({
+  const response = await fetch(`${API_BASE}${path}`, {
     headers: { ...OUTGOING_HEADERS, Authorization: `Bearer ${token}` },
-  }));
+  });
   const total = response.headers.get('x-total');
   // On a 429, 42's API tells us the REAL cooldown via Retry-After — verified live this can
   // be anywhere from ~14 minutes to ~47 minutes depending on how hard it's been hit. Blindly
@@ -375,11 +364,11 @@ const getAppToken = async () => {
     client_id: process.env.FT_CLIENT_ID,
     client_secret: process.env.FT_CLIENT_SECRET,
   });
-  const response = await fetch(TOKEN_URL, withProxy({
+  const response = await fetch(TOKEN_URL, {
     method: 'POST',
     headers: { ...OUTGOING_HEADERS, 'Content-Type': 'application/x-www-form-urlencoded' },
     body,
-  }));
+  });
   if (!response.ok) { throw new Error('APP_TOKEN_FAILED'); }
   const data = await response.json();
   appTokenCache = { token: data.access_token, expiresAt: Date.now() + (data.expires_in || 3600) * 1000 };
@@ -515,11 +504,11 @@ const exchangeCodeForToken = async (code, redirectUri) => {
     code,
     redirect_uri: redirectUri,
   });
-  const response = await fetch(TOKEN_URL, withProxy({
+  const response = await fetch(TOKEN_URL, {
     method: 'POST',
     headers: { ...OUTGOING_HEADERS, 'Content-Type': 'application/x-www-form-urlencoded' },
     body,
-  }));
+  });
   if (!response.ok) {
     const text = await response.text().catch(() => response.statusText);
     throw new Error(`AUTH_FAILED:${response.status}:${text}`);
@@ -534,11 +523,11 @@ const refreshAccessToken = async (refreshToken) => {
     client_secret: process.env.FT_CLIENT_SECRET,
     refresh_token: refreshToken,
   });
-  const response = await fetch(TOKEN_URL, withProxy({
+  const response = await fetch(TOKEN_URL, {
     method: 'POST',
     headers: { ...OUTGOING_HEADERS, 'Content-Type': 'application/x-www-form-urlencoded' },
     body,
-  }));
+  });
   if (!response.ok) { throw new Error('REFRESH_FAILED'); }
   return response.json();
 };
@@ -550,9 +539,9 @@ const refreshAccessToken = async (refreshToken) => {
 // retry 429s again since nothing ever backs off.
 const fetchMe = async (accessToken) => {
   await throttle();
-  const response = await fetch(`${API_BASE}/me`, withProxy({
+  const response = await fetch(`${API_BASE}/me`, {
     headers: { ...OUTGOING_HEADERS, Authorization: `Bearer ${accessToken}` },
-  }));
+  });
   if (response.ok) { return response.json(); }
 
   if (response.status === 429) {
@@ -560,9 +549,9 @@ const fetchMe = async (accessToken) => {
     if (retryAfterSeconds <= MAX_AUTO_RETRY_WAIT_SECONDS) {
       await new Promise((r) => setTimeout(r, retryAfterSeconds * 1000));
       await throttle();
-      const retryResponse = await fetch(`${API_BASE}/me`, withProxy({
+      const retryResponse = await fetch(`${API_BASE}/me`, {
         headers: { ...OUTGOING_HEADERS, Authorization: `Bearer ${accessToken}` },
-      }));
+      });
       if (retryResponse.ok) { return retryResponse.json(); }
       const body = await retryResponse.text().catch(() => '');
       throw new Error(`ME_FETCH_FAILED:${retryResponse.status}:${body.slice(0, 300)}`);
