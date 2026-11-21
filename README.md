@@ -17,10 +17,10 @@ across a campus's students via the API, so search is an exact-login lookup
 ## Setup
 
 ```bash
-npm install        # installs root, server, and client deps
+npm install && npm run install:all   # root deps, then server/ and client/ deps
 cp server/.env.example server/.env
 # fill in FT_CLIENT_ID / FT_CLIENT_SECRET from https://profile.intra.42.fr/oauth/applications
-npm run dev         # runs server (port 4000) + client (port 5173) together
+npm run dev         # runs server (port 4000) + client (port 5174) together
 ```
 
-Open http://localhost:5173.
+Open http://localhost:5174.
