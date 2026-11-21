@@ -2,7 +2,7 @@ import 'dotenv/config';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import express from 'express';
 import cors from 'cors';
-import { MOROCCAN_CAMPUSES } from './campuses.js';
+import { MOROCCAN_CAMPUSES, isMoroccanCampusId } from './campuses.js';
 import {
   getSession,
   setSessionCookie,
@@ -195,7 +195,7 @@ const normalizeFullProfile = (data, coalitions) => {
     location: data.location || null,
     active: data['active?'] ?? false,
     isStaff: data['staff?'] ?? false,
-    imageUrl: data.image?.link || data.image?.versions?.large || null,
+    imageUrl: data.image?.versions?.large || data.image?.link || null,
     campus: primaryCampus?.name || 'N/A',
     country: primaryCampus?.country || 'N/A',
     campuses,
@@ -263,7 +263,7 @@ const mapAchievementHolder = (item) => {
     id: u.id,
     login: u.login,
     displayName: u.usual_full_name || u.displayname || u.login,
-    imageUrl: u.image?.link || u.image?.versions?.medium || null,
+    imageUrl: u.image?.versions?.medium || u.image?.link || null,
     // The promo/cohort a student joined in — used for the client-side promo filter. 42's
     // API has no gender/sex field anywhere (checked live against a full user object), so
     // that filter genuinely isn't buildable here.
@@ -287,12 +287,17 @@ const isStaffHolder = (item) => {
 // verified live this achievement alone has 1000+ this-year achievers, so that all-time list
 // is far bigger still and would need its own uncapped-feeling page limit for no real benefit
 // (we already have everything from achievements_users we actually need here).
+//
+// Runs under the app's client_credentials token, not the visitor's: verified live that the
+// same query under a visitor token silently returned only 909 of the 1178 this-year
+// achievers, and NONE of the missing ones were Moroccan-primary, which emptied every campus
+// list. What 42 returns here depends on whose token asks; the app token sees everyone.
 const fetchThisYearAchievers = async (achievementId) => {
   const year = new Date().getFullYear();
   const raw = await fetchAllPages(
     `/achievements_users?filter[achievement_id]=${achievementId}` +
       `&range[created_at]=${year}-01-01T00:00:00.000Z,${year + 1}-01-01T00:00:00.000Z`,
-    { maxPages: 15 },
+    { maxPages: 15, tokenOverride: await getAppToken() },
   );
   return raw.map((r) => ({ userId: r.user_id, login: r.login }));
 };
@@ -322,7 +327,7 @@ const fetchAchievedAt = async (userId, achievementId) => {
 // itself, instead of forcing a ~10-minute one-profile-at-a-time scan under a visitor's
 // token, is a reasonable trade. Every other route is untouched and still visitor-scoped.
 //
-// Cached per campus with a TTL (same pattern as achievementHoldersCache below) — NOT a
+// Cached per campus with a TTL (same pattern as achieverIndexCache below) — NOT a
 // fire-and-forget background job. An earlier version kicked the scan off detached and had
 // the route return immediately, relying on the client to poll until it finished; that works
 // on a persistent Node process (local dev) but silently never completes on Vercel, because a
@@ -372,11 +377,19 @@ const getAppToken = async () => {
 // current size.
 const ROSTER_MAX_PAGES = 60;
 
+// Same rule as normalizeFullProfile: 42 can leave more than one row flagged is_primary
+// after a campus flip, and the most recently touched one is the real one.
+const pickPrimaryRow = (rows) =>
+  rows
+    .filter((r) => r.is_primary)
+    .sort((a, b) => new Date(b.updated_at || b.created_at || 0) - new Date(a.updated_at || a.created_at || 0))[0] || null;
+
+
 const mapParisAdderRow = (u, row, campusId) => ({
   id: u.id,
   login: u.login,
   displayName: u.usual_full_name || u.displayname || u.login,
-  imageUrl: u.image?.link || u.image?.versions?.medium || null,
+  imageUrl: u.image?.versions?.medium || u.image?.link || null,
   campuses: [CAMPUS_NAME_LOOKUP[campusId], CAMPUS_NAME_LOOKUP[PARIS_CAMPUS_ID]],
   poolYear: u.pool_year || null,
   // When this student's campus_users row for Paris was created — i.e. when Paris was
@@ -395,7 +408,7 @@ const mapParisAdderRow = (u, row, campusId) => ({
 });
 
 const PARIS_ADDERS_CACHE_TTL_MS = 60 * 60 * 1000; // hourly — this data changes rarely
-const parisAddersCache = new Map(); // campusId -> { rosterPage, rosterExhausted, adders, cachedAt }
+const parisAddersCache = new Map(); // campusId -> { rosterPage, rosterExhausted, adders, switchers, cachedAt }
 
 // Paginated like the achievement holders route: only as many roster pages (100 students
 // each) get fetched — and immediately campus_users-checked — as are needed to cover the
@@ -405,7 +418,7 @@ const parisAddersCache = new Map(); // campusId -> { rosterPage, rosterExhausted
 const getParisAddersPage = async (campusId, { force = false, page = 1, pageSize = 10, promo = null } = {}) => {
   let entry = !force && parisAddersCache.get(campusId);
   if (!entry || Date.now() - entry.cachedAt >= PARIS_ADDERS_CACHE_TTL_MS) {
-    entry = { rosterPage: 0, rosterExhausted: false, adders: [], cachedAt: Date.now() };
+    entry = { rosterPage: 0, rosterExhausted: false, adders: [], switchers: [], cachedAt: Date.now() };
   }
 
   const token = await getAppToken();
@@ -433,11 +446,28 @@ const getParisAddersPage = async (campusId, { force = false, page = 1, pageSize 
         `/campus_users?filter[user_id]=${candidates.map((u) => u.id).join(',')}`,
         { maxPages: 3, tokenOverride: token, priority },
       );
+      const rowsByUser = new Map();
       for (const row of rows) {
-        if (row.campus_id !== PARIS_CAMPUS_ID) { continue; }
-        const u = byId.get(row.user_id);
-        if (!u) { continue; }
-        entry.adders.push(mapParisAdderRow(u, row, campusId));
+        if (!rowsByUser.has(row.user_id)) { rowsByUser.set(row.user_id, []); }
+        rowsByUser.get(row.user_id).push(row);
+      }
+      // A campus roster still lists students who have since made Paris their PRIMARY campus
+      // (their old campus_users row remains). Those are no longer at this campus: they go to
+      // this campus's Paris-switchers list (if they switched this season), never to the
+      // main "Paris on profile" table. Same primary-campus rule as the achiever index.
+      for (const [userId, userRows] of rowsByUser) {
+        const parisRow = userRows.find((r) => r.campus_id === PARIS_CAMPUS_ID);
+        const u = byId.get(userId);
+        if (!parisRow || !u) { continue; }
+        const primary = pickPrimaryRow(userRows);
+        if (primary?.campus_id === PARIS_CAMPUS_ID) {
+          const switchedAt = primary.updated_at || primary.created_at;
+          if (switchedAt && new Date(switchedAt) >= PARIS_SWITCH_SINCE) {
+            entry.switchers.push({ ...mapAchievementHolder(u), campusId, recentParisMove: true, switchedAt });
+          }
+          continue;
+        }
+        entry.adders.push(mapParisAdderRow(u, parisRow, campusId));
       }
     }
     if (rosterChunk.length < 100) { entry.rosterExhausted = true; }
@@ -459,10 +489,24 @@ const getParisAddersPage = async (campusId, { force = false, page = 1, pageSize 
 // Callers that need the FULL list, not one page (the boot-time prewarm below) — an
 // unreachable `pageSize` means getParisAddersPage's internal loop only stops once the whole
 // roster is exhausted, so one call already does the full scan.
-const getParisAdders = async (campusId, { bypassCache = false } = {}) => {
-  const { adders } = await getParisAddersPage(campusId, { force: bypassCache, page: 1, pageSize: Number.MAX_SAFE_INTEGER });
-  return adders;
+const parisAddersFullScanInFlight = new Map(); // campusId -> Promise
+const fullScanParisAdders = (campusId, { bypassCache = false } = {}) => {
+  const inFlight = parisAddersFullScanInFlight.get(campusId);
+  if (inFlight) { return inFlight; }
+  const scan = getParisAddersPage(campusId, { force: bypassCache, page: 1, pageSize: Number.MAX_SAFE_INTEGER })
+    .then(() => parisAddersCache.get(campusId))
+    .finally(() => parisAddersFullScanInFlight.delete(campusId));
+  parisAddersFullScanInFlight.set(campusId, scan);
+  return scan;
 };
+
+const getParisAdders = async (campusId, options) => (await fullScanParisAdders(campusId, options)).adders;
+
+// Students from a "Paris on profile" campus (Tétouan) who switched to Paris this season.
+// Unlike Khouribga/Benguerir, Tétouan's main table isn't built from the achievement, so its
+// switchers can't come from the achiever index alone: a Tétouan student who moved to Paris
+// without earning the achievement this year would otherwise stay stuck in the main table.
+const getRosterParisSwitchers = async (campusId) => (await fullScanParisAdders(campusId)).switchers;
 
 // Prewarmed at boot in local dev only — a Vercel function instance isn't a long-lived
 // process, so there's no "boot" to hook; there the first real request to hit a cold cache
@@ -677,7 +721,7 @@ app.get('/api/auth/callback', async (req, res) => {
       id: me.id,
       login: me.login,
       displayName: me.usual_full_name || me.displayname || me.login,
-      imageUrl: me.image?.link || me.image?.versions?.medium || null,
+      imageUrl: me.image?.versions?.medium || me.image?.link || null,
       // Captured once at login so the client can default the campus dropdown to the
       // visitor's own campus instead of "All Morocco" — not refreshed on token refresh
       // since a student's home campus essentially never changes mid-session.
@@ -722,32 +766,126 @@ app.get('/api/achievements/achieved-date', requireAuth, async (req, res) => {
   }
 });
 
-// Khouribga/Benguerir achievement holders are already fast to fetch (a handful of filtered
-// calls, a few seconds), so unlike the Tétouan/Rabat Paris scan this just needs a plain
-// TTL cache — no need for the async pending/ready job machinery that exists specifically to
-// handle a multi-minute operation. Cached per achievement+campus combination; "this year"
-// logins are cached separately (shared across every campus for the same achievement).
-// 60min (not 15) so the this-year-achievers fetch — the expensive worldwide part of the
-// Paris-switchers scan below, shared with this same cache — stays reusable for as long as
-// that scan's own cache does, instead of going cold 4x more often than it needs to.
-const ACHIEVEMENT_HOLDERS_CACHE_TTL_MS = 60 * 60 * 1000;
-const achievementHoldersCache = new Map(); // `${achievementId}:${campusKey}` -> { data, cachedAt }
-// One shared cache of {userId, login} per achievement — both the plain-logins Set (used by
-// the holders route below) and the Paris-switchers scan (which additionally needs userId)
-// derive from this same cached fetch, so it never runs twice for the same achievement.
+// Every this-year achiever, sorted into exactly one bucket by their REAL primary campus:
+// a Moroccan campus's holders list, the "recently switched to Paris" list, or neither.
+//
+// Why not GET /v2/achievements/:id/users?filter[primary_campus_id]=X (what this used to do):
+// verified live that filter is unreliable. For the same Khouribga query, the app token got
+// 55 holders, a visitor's token got 0, and minutes earlier the same query had returned 271,
+// including students whose campus_users rows clearly showed Paris as primary. That's what
+// made Paris-switched students show up under their old Moroccan campus AND in the switchers
+// section at the same time. campus_users itself is accurate, so it's the source of truth:
+// one bulk check (100 users per call) decides where every achiever belongs, and the holders
+// lists and the switchers list are both built from that single result, so they can't overlap.
+//
+// Every call in this build runs under the app's client_credentials token, the same deliberate
+// exception as the Paris-adders scan: campus_users filter[user_id] 403s under a visitor's
+// `scope: public` token, and the achievers list is incomplete under one (see
+// fetchThisYearAchievers). Visitors still need to be logged in to reach these routes.
+const ACHIEVEMENT_INDEX_CACHE_TTL_MS = 60 * 60 * 1000;
 const thisYearAchieversCache = new Map(); // achievementId -> { achievers, cachedAt }
+const achieverIndexCache = new Map(); // achievementId -> { index, cachedAt }
+// Concurrent requests (4 campus sections, the switchers section, an exact-total scan) all
+// share ONE in-flight build instead of each starting its own ~40-call scan on a cold cache.
+const achieverIndexInFlight = new Map(); // achievementId -> Promise<index>
 
 const getThisYearAchieversCached = async (achievementId) => {
   const cached = thisYearAchieversCache.get(achievementId);
-  if (cached && Date.now() - cached.cachedAt < ACHIEVEMENT_HOLDERS_CACHE_TTL_MS) { return cached.achievers; }
+  if (cached && Date.now() - cached.cachedAt < ACHIEVEMENT_INDEX_CACHE_TTL_MS) { return cached.achievers; }
   const achievers = await fetchThisYearAchievers(achievementId);
   thisYearAchieversCache.set(achievementId, { achievers, cachedAt: Date.now() });
   return achievers;
 };
 
-const getThisYearLoginsCached = async (achievementId) => {
-  const achievers = await getThisYearAchieversCached(achievementId);
-  return new Set(achievers.map((a) => a.login));
+const buildAchieverIndex = async (achievementId) => {
+  const token = await getAppToken();
+  const achievers = await getThisYearAchieversCached(achievementId); // [{userId, login}]
+
+  const holderIdsByCampus = new Map(MOROCCAN_CAMPUSES.map((c) => [c.id, []]));
+  const switcherMatches = []; // { userId, campusId, switchedAt }
+
+  for (let i = 0; i < achievers.length; i += 100) {
+    const chunk = achievers.slice(i, i + 100);
+    const rows = await fetchAllPages(
+      `/campus_users?filter[user_id]=${chunk.map((a) => a.userId).join(',')}`,
+      { maxPages: 5, tokenOverride: token },
+    );
+    const rowsByUser = new Map();
+    for (const row of rows) {
+      if (!rowsByUser.has(row.user_id)) { rowsByUser.set(row.user_id, []); }
+      rowsByUser.get(row.user_id).push(row);
+    }
+
+    for (const [userId, userRows] of rowsByUser) {
+      const primary = pickPrimaryRow(userRows);
+      if (!primary) { continue; }
+      if (isMoroccanCampusId(primary.campus_id)) {
+        holderIdsByCampus.get(primary.campus_id).push(userId);
+        continue;
+      }
+      // Not Moroccan-primary: only relevant if it's a Moroccan student who moved to Paris
+      // this season. Anyone else (other campuses worldwide) is simply not ours.
+      if (primary.campus_id !== PARIS_CAMPUS_ID) { continue; }
+      const switchedAt = primary.updated_at || primary.created_at;
+      if (!switchedAt || new Date(switchedAt) < PARIS_SWITCH_SINCE) { continue; }
+      const homeRow = userRows.find((r) => isMoroccanCampusId(r.campus_id));
+      if (!homeRow) { continue; }
+      switcherMatches.push({ userId, campusId: homeRow.campus_id, switchedAt });
+    }
+  }
+
+  // Display info (name/avatar/pool_year/staff flags), only for students we'll actually show.
+  const ids = [...[...holderIdsByCampus.values()].flat(), ...switcherMatches.map((m) => m.userId)];
+  const userById = new Map();
+  for (let i = 0; i < ids.length; i += 100) {
+    const users = await fetchAllPages(
+      `/users?filter[id]=${ids.slice(i, i + 100).join(',')}`,
+      { maxPages: 2, tokenOverride: token },
+    );
+    for (const u of users) { userById.set(u.id, u); }
+  }
+
+  const byName = (a, b) => a.displayName.localeCompare(b.displayName);
+  const holdersByCampus = new Map();
+  for (const [campusId, campusIds] of holderIdsByCampus) {
+    holdersByCampus.set(
+      campusId,
+      campusIds
+        .map((id) => userById.get(id))
+        .filter((u) => u && u.login !== 'asabbar' && !isStaffHolder(u))
+        .map(mapAchievementHolder)
+        .sort(byName),
+    );
+  }
+
+  const switchers = switcherMatches
+    .map((m) => {
+      const u = userById.get(m.userId);
+      if (!u || isStaffHolder(u)) { return null; }
+      return { ...mapAchievementHolder(u), campusId: m.campusId, recentParisMove: true, switchedAt: m.switchedAt };
+    })
+    .filter(Boolean)
+    .sort(byName);
+
+  return { holdersByCampus, switchers };
+};
+
+const getAchieverIndex = (achievementId, { bypassCache = false } = {}) => {
+  const cached = achieverIndexCache.get(achievementId);
+  if (!bypassCache && cached && Date.now() - cached.cachedAt < ACHIEVEMENT_INDEX_CACHE_TTL_MS) {
+    return Promise.resolve(cached.index);
+  }
+  const inFlight = achieverIndexInFlight.get(achievementId);
+  if (inFlight) { return inFlight; }
+
+  const build = (async () => {
+    if (bypassCache) { thisYearAchieversCache.delete(achievementId); }
+    const index = await buildAchieverIndex(achievementId);
+    achieverIndexCache.set(achievementId, { index, cachedAt: Date.now() });
+    return index;
+  })().finally(() => achieverIndexInFlight.delete(achievementId));
+  achieverIndexInFlight.set(achievementId, build);
+  return build;
 };
 
 app.get('/api/achievements/holders', requireAuth, async (req, res) => {
@@ -755,9 +893,7 @@ app.get('/api/achievements/holders', requireAuth, async (req, res) => {
   if (!name) { return res.status(400).json({ error: 'EMPTY_NAME' }); }
 
   // Scoped to Morocco by default (all 4 campuses, grouped per campus below), or a single one
-  // when `campus` is given. Verified live: GET /v2/achievements/:id/users supports
-  // filter[primary_campus_id] (its error message on an unsupported filter name told us the
-  // real field is `primary_campus_id`, not `campus_id`).
+  // when `campus` is given.
   const requestedCampusId = req.query.campus ? Number(req.query.campus) : null;
   if (requestedCampusId && !MOROCCAN_CAMPUSES.some((c) => c.id === requestedCampusId)) {
     return res.status(400).json({ error: 'INVALID_CAMPUS' });
@@ -766,113 +902,37 @@ app.get('/api/achievements/holders', requireAuth, async (req, res) => {
   try {
     const achievement = await findAchievementByName(name);
     if (!achievement) { return res.status(404).json({ error: 'ACHIEVEMENT_NOT_FOUND' }); }
-
-    const bypassCache = req.query.refresh === '1';
-    const cacheKey = `${achievement.id}:${requestedCampusId || 'all'}`;
-
-    // Both filters below cost no per-holder calls: staff exclusion reads fields already on
-    // the raw holder object, and the year filter is one shared, paginated lookup reused
-    // across every campus.
-    const thisYearLogins = await getThisYearLoginsCached(achievement.id);
-    const filterHolders = (rawHolders) =>
-      rawHolders
-        .filter((item) => (item.user || item).login !== 'asabbar')
-        .filter((item) => !isStaffHolder(item))
-        .filter((item) => thisYearLogins.has((item.user || item).login))
-        .map(mapAchievementHolder);
+    const index = await getAchieverIndex(achievement.id, { bypassCache: req.query.refresh === '1' });
 
     if (requestedCampusId) {
-      // Single campus selected — flat list, no grouping needed. Achieved date is NOT
-      // fetched here (that would be 1 extra call per holder and make the whole list slow) —
-      // it's fetched lazily, only for the one student a card is actually clicked open for.
-      //
-      // Real backend pagination: only as many upstream pages get fetched from 42 as are
-      // needed to cover the requested page — page 1 at the default size usually needs just
-      // one upstream page of 100 raw holders, not all of them. The cache entry holds
-      // whatever's been fetched SO FAR (raw holders + how many upstream pages consumed),
-      // and a later request for a deeper page/larger size just fetches the additional
-      // upstream pages needed and extends it, instead of restarting from zero.
+      // Single campus: the whole campus is already known from the index, so counts and promo
+      // years are exact on the first response. Achieved date is still fetched lazily, only
+      // for the one student whose card is opened.
       const page = Math.max(1, Number(req.query.page) || 1);
       const pageSize = Math.max(1, Number(req.query.pageSize) || 10);
-      const neededCount = page * pageSize;
-      // A huge pageSize (see ensureExactTotal in App.jsx) means this is a background
-      // full-scan, not a visible page the visitor is waiting on — let foreground requests
-      // (a normal small page, from this campus or any other) cut ahead of it in the shared
-      // throttle queue instead of queuing behind however much of this scan is left.
-      const priority = pageSize > 1000 ? 'low' : 'high';
-
-      let entry = !bypassCache && achievementHoldersCache.get(cacheKey);
-      if (!entry || Date.now() - entry.cachedAt >= ACHIEVEMENT_HOLDERS_CACHE_TTL_MS) {
-        entry = { rawHolders: [], upstreamPage: 0, exhausted: false, total: null, cachedAt: Date.now() };
-      }
-
-      const upstreamMaxPages = 5; // same ceiling as before (500 raw holders per campus)
-      while (
-        filterHolders(entry.rawHolders).length < neededCount &&
-        !entry.exhausted &&
-        entry.upstreamPage < upstreamMaxPages
-      ) {
-        const nextPage = entry.upstreamPage + 1;
-        const { data: rawPage, total } = await apiGet(
-          `/achievements/${achievement.id}/users?filter[primary_campus_id]=${requestedCampusId}&page[size]=100&page[number]=${nextPage}`,
-          undefined,
-          priority,
-        );
-        // 42 reports the RAW total via the x-total header — free on every request, no extra
-        // call needed — but it's the count before our staff/this-year filtering, so it can
-        // read a little higher than `holders` actually ends up containing.
-        if (total != null) { entry.total = total; }
-        entry.upstreamPage = nextPage;
-        if (!Array.isArray(rawPage) || rawPage.length === 0) {
-          entry.exhausted = true;
-          break;
-        }
-        entry.rawHolders = entry.rawHolders.concat(rawPage);
-        if (rawPage.length < 100) { entry.exhausted = true; }
-      }
-      achievementHoldersCache.set(cacheKey, entry);
-
-      const allFiltered = filterHolders(entry.rawHolders);
-      // Optional promo-year filter, applied server-side (after our own staff/this-year
-      // filter) so a selected year filters the actual paginated results — the dropdown's
-      // options come from `promoYears` below, only meaningful once the whole campus has been
-      // scanned, same as exactTotal.
+      const allHolders = index.holdersByCampus.get(requestedCampusId) || [];
       const promo = req.query.promo ? String(req.query.promo) : null;
-      const promoFiltered = promo ? allFiltered.filter((h) => String(h.poolYear) === promo) : allFiltered;
+      const promoFiltered = promo ? allHolders.filter((h) => String(h.poolYear) === promo) : allHolders;
       const holders = promoFiltered.slice((page - 1) * pageSize, page * pageSize);
-      const hasMore = promoFiltered.length > page * pageSize || !entry.exhausted;
-      // Both only known once the roster's been scanned all the way through (entry.exhausted)
-      // — null until then. `total` (the raw x-total header) is available immediately as a
-      // rough stand-in; the client shows that first and swaps in this exact count once a
-      // background full-scan request (see fetchAchievementHolders in api.js) completes.
-      const exactTotal = entry.exhausted ? promoFiltered.length : null;
-      const promoYears = entry.exhausted
-        ? [...new Set(allFiltered.map((h) => h.poolYear).filter(Boolean))].sort().reverse()
-        : null;
-      return res.json({ achievement, holders, page, pageSize, hasMore, total: entry.total, exactTotal, promoYears });
+      const promoYears = [...new Set(allHolders.map((h) => h.poolYear).filter(Boolean))].sort().reverse();
+      return res.json({
+        achievement,
+        holders,
+        page,
+        pageSize,
+        hasMore: promoFiltered.length > page * pageSize,
+        total: allHolders.length,
+        exactTotal: promoFiltered.length,
+        promoYears,
+      });
     }
 
-    // "All Morocco": the holder objects carry no campus field at all (verified live), so the
-    // only way to know which campus each one belongs to is to query per campus separately —
-    // one filtered call per campus, then group under that campus's own section. Unpaginated
-    // (unlike the single-campus branch above) — still fetches every campus's full list.
-    const cachedAll = !bypassCache && achievementHoldersCache.get(cacheKey);
-    if (cachedAll?.data && Date.now() - cachedAll.cachedAt < ACHIEVEMENT_HOLDERS_CACHE_TTL_MS) {
-      return res.json({ achievement, ...cachedAll.data });
-    }
-
-    const groups = [];
-    for (const c of MOROCCAN_CAMPUSES) {
-      const rawHolders = await fetchAllPages(
-        `/achievements/${achievement.id}/users?filter[primary_campus_id]=${c.id}`,
-        { maxPages: 5 },
-      );
-      const holders = filterHolders(rawHolders);
-      groups.push({ campus: { id: c.id, name: c.name }, holders });
-    }
-    const data = { groups };
-    achievementHoldersCache.set(cacheKey, { data, cachedAt: Date.now() });
-    res.json({ achievement, ...data });
+    // "All Morocco": every campus's full list, grouped per campus.
+    const groups = MOROCCAN_CAMPUSES.map((c) => ({
+      campus: { id: c.id, name: c.name },
+      holders: index.holdersByCampus.get(c.id) || [],
+    }));
+    res.json({ achievement, groups });
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });
   }
@@ -908,94 +968,6 @@ app.get('/api/campuses/:campusId/paris-adders', requireAuth, async (req, res) =>
   }
 });
 
-// The students who genuinely explain a drop in an achievement's holder count: they still
-// hold it, but 42's filter[primary_campus_id] query can no longer see them because their
-// primary campus is now Paris. Scoped to ONLY this achievement's this-year achievers —
-// verified live this one alone has 1000+ this-year achievers, so an "all holders of all
-// time" list (as an earlier version of this used) would be even bigger and need its own
-// uncapped-feeling page limit for zero benefit; achievements_users already gives us every
-// this-year achiever's user_id, which is all the campus_users bulk-check below needs.
-// Display info (name/avatar/pool_year) is fetched only for the handful who actually match —
-// not for all 1000+ this-year achievers up front.
-const PARIS_SWITCHERS_CACHE_TTL_MS = 60 * 60 * 1000;
-const parisSwitchersCache = new Map(); // achievementId -> { switchers, cachedAt }
-
-// Starts from the this-year-achievers list (getThisYearAchieversCached) rather than a fresh
-// scan of our own: that list is ALSO what the normal holders route uses to filter holders to
-// this-year-only, so by the time this runs (triggered right after a holders view loads) it's
-// usually already warm in cache — no extra worldwide fetch, just the campus_users bulk-check
-// below on top of a list that was going to be fetched anyway.
-const computeAchievementParisSwitchers = async (achievementId) => {
-  const token = await getAppToken();
-  const achievers = await getThisYearAchieversCached(achievementId); // [{userId, login}]
-  if (achievers.length === 0) { return []; }
-
-  const loginById = new Map(achievers.map((a) => [a.userId, a.login]));
-  const matches = []; // { userId, login, campusId }
-
-  for (let i = 0; i < achievers.length; i += 100) {
-    const chunk = achievers.slice(i, i + 100);
-    const rows = await fetchAllPages(
-      `/campus_users?filter[user_id]=${chunk.map((a) => a.userId).join(',')}`,
-      { maxPages: 3, tokenOverride: token },
-    );
-
-    // Grouped by user_id so both the Paris row AND the student's Moroccan home-campus row
-    // (needed to know which section to bucket them under) are visible at the same time.
-    const rowsByUser = new Map();
-    for (const row of rows) {
-      if (!rowsByUser.has(row.user_id)) { rowsByUser.set(row.user_id, []); }
-      rowsByUser.get(row.user_id).push(row);
-    }
-
-    for (const [userId, userRows] of rowsByUser) {
-      const parisRow = userRows.find((r) => r.campus_id === PARIS_CAMPUS_ID);
-      if (!parisRow?.is_primary) { continue; }
-      const switchedAt = parisRow.updated_at || parisRow.created_at;
-      if (!switchedAt || new Date(switchedAt) < PARIS_SWITCH_SINCE) { continue; }
-      const homeRow = userRows.find((r) => MOROCCAN_CAMPUSES.some((c) => c.id === r.campus_id));
-      if (!homeRow) { continue; }
-
-      matches.push({ userId, login: loginById.get(userId), campusId: homeRow.campus_id, switchedAt });
-    }
-  }
-  if (matches.length === 0) { return []; }
-
-  // Only now — for the small matched set — fetch the display info a card actually needs.
-  const userRows = await fetchAllPages(
-    `/users?filter[id]=${matches.map((m) => m.userId).join(',')}`,
-    { maxPages: 3, tokenOverride: token },
-  );
-  const userById = new Map(userRows.map((u) => [u.id, u]));
-
-  return matches
-    .map((m) => {
-      const u = userById.get(m.userId);
-      if (!u || u['staff?'] === true) { return null; }
-      return {
-        id: m.userId,
-        login: m.login,
-        displayName: u.usual_full_name || u.displayname || m.login,
-        imageUrl: u.image?.link || u.image?.versions?.medium || null,
-        poolYear: u.pool_year || null,
-        campusId: m.campusId,
-        recentParisMove: true,
-        switchedAt: m.switchedAt,
-      };
-    })
-    .filter(Boolean);
-};
-
-const getAchievementParisSwitchers = async (achievementId, { bypassCache = false } = {}) => {
-  const cached = parisSwitchersCache.get(achievementId);
-  if (!bypassCache && cached && Date.now() - cached.cachedAt < PARIS_SWITCHERS_CACHE_TTL_MS) {
-    return cached.switchers;
-  }
-  const switchers = await computeAchievementParisSwitchers(achievementId);
-  parisSwitchersCache.set(achievementId, { switchers, cachedAt: Date.now() });
-  return switchers;
-};
-
 app.get('/api/achievements/paris-switchers', requireAuth, async (req, res) => {
   const name = String(req.query.name || '').trim();
   if (!name) { return res.status(400).json({ error: 'EMPTY_NAME' }); }
@@ -1009,7 +981,17 @@ app.get('/api/achievements/paris-switchers', requireAuth, async (req, res) => {
   try {
     const achievement = await findAchievementByName(name);
     if (!achievement) { return res.status(404).json({ error: 'ACHIEVEMENT_NOT_FOUND' }); }
-    const allSwitchers = await getAchievementParisSwitchers(achievement.id, { bypassCache: req.query.refresh === '1' });
+    const { switchers: indexSwitchers } = await getAchieverIndex(achievement.id, { bypassCache: req.query.refresh === '1' });
+    let allSwitchers = indexSwitchers;
+    const rosterCampusIds = (campusId != null ? [campusId] : MOROCCAN_CAMPUSES.map((c) => c.id))
+      .filter((id) => NO_ACHIEVEMENT_CAMPUS_IDS.includes(id) && id !== RABAT_CAMPUS_ID);
+    for (const id of rosterCampusIds) {
+      const seen = new Set(allSwitchers.map((s) => s.login));
+      const extra = (await getRosterParisSwitchers(id)).filter((s) => !seen.has(s.login));
+      if (extra.length > 0) {
+        allSwitchers = [...allSwitchers, ...extra].sort((a, b) => a.displayName.localeCompare(b.displayName));
+      }
+    }
 
     // Filter by campus when requested (e.g. single-campus view), otherwise return all.
     const scoped = campusId != null ? allSwitchers.filter((s) => s.campusId === campusId) : allSwitchers;
@@ -1032,6 +1014,36 @@ app.get('/api/students/:login/profile', requireAuth, async (req, res) => {
   } catch (err) {
     if (err.status === 404) { return res.status(404).json({ error: 'NOT_FOUND' }); }
     res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// cdn.intra.42.fr answers 403 to anonymous requests for user photos (it only serves them to
+// a logged-in intra session or a request carrying a 42 API bearer token), so the browser
+// can't load them directly from this site. This fetches the photo with the visitor's own
+// token and streams it back. Only 42 user-photo URLs are accepted, so this can't be used as
+// an open proxy. Deliberately NOT routed through throttle(): the CDN isn't the rate-limited
+// API (verified: parallel bursts all return 200), and queueing every avatar at 550ms would
+// make a 100-row list take nearly a minute to show its photos.
+const AVATAR_URL_RE = /^https:\/\/cdn\.intra\.42\.fr\/users\/[0-9a-f]+\/[\w.-]+$/;
+
+app.get('/api/avatar', requireAuth, async (req, res) => {
+  const url = String(req.query.url || '');
+  if (!AVATAR_URL_RE.test(url)) { return res.status(400).json({ error: 'BAD_AVATAR_URL' }); }
+
+  try {
+    const upstream = await fetch(url, {
+      headers: { Authorization: `Bearer ${requestContext.getStore().token}` },
+    });
+    const type = upstream.headers.get('content-type') || '';
+    if (!upstream.ok || !type.startsWith('image/')) {
+      return res.status(upstream.ok ? 502 : upstream.status).end();
+    }
+    // Private: the response depends on the visitor's session. A day is plenty, since a photo
+    // change gives the student a new URL anyway (the path includes a content hash).
+    res.set({ 'Content-Type': type, 'Cache-Control': 'private, max-age=86400' });
+    res.send(Buffer.from(await upstream.arrayBuffer()));
+  } catch {
+    res.status(502).end();
   }
 });
 

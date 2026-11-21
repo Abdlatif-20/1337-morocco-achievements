@@ -1,3 +1,5 @@
+import Avatar from './Avatar.jsx';
+
 const initials = (name) =>
   name
     .split(' ')
@@ -14,11 +16,13 @@ const StudentCard = ({ student, onOpen }) => {
   return (
     <div className={`student-card${isOwner ? ' student-card-owner' : ''}`} role="button" tabIndex={0} onClick={() => onOpen(student)}>
       <div className="student-avatar-wrap">
-        {student.imageUrl ? (
-          <img className="student-avatar" src={student.imageUrl} alt={student.displayName} />
-        ) : (
-          <div className="student-avatar student-avatar-fallback">{initials(student.displayName)}</div>
-        )}
+        <Avatar
+          url={student.imageUrl}
+          alt={student.displayName}
+          className="student-avatar"
+          fallbackClassName="student-avatar-fallback"
+          fallback={initials(student.displayName)}
+        />
         {student.active && <span className="student-online-dot" title="Active now" />}
       </div>
       <div className="student-info">

@@ -12,6 +12,7 @@ import {
   logout,
 } from './api.js';
 import { getRecentUses, readCache, recordUse, writeCache } from './browserCache.js';
+import Avatar from './components/Avatar.jsx';
 import BackgroundMusic from './components/BackgroundMusic.jsx';
 import StudentCard from './components/StudentCard.jsx';
 import StudentDetailModal from './components/StudentDetailModal.jsx';
@@ -135,13 +136,14 @@ const AccountMenu = ({ user, onLogout }) => {
   return (
     <div className="account-menu" onClick={(e) => e.stopPropagation()}>
       <button type="button" className="account-avatar-btn" onClick={() => setOpen((v) => !v)}>
-        {user.imageUrl ? (
-          <img src={user.imageUrl} alt={user.displayName} className="account-avatar" />
-        ) : (
-          <span className="account-avatar account-avatar-fallback">
-            {user.displayName.slice(0, 2).toUpperCase()}
-          </span>
-        )}
+        <Avatar
+          as="span"
+          url={user.imageUrl}
+          alt={user.displayName}
+          className="account-avatar"
+          fallbackClassName="account-avatar-fallback"
+          fallback={user.displayName.slice(0, 2).toUpperCase()}
+        />
       </button>
       {open && (
         <div className="account-dropdown">
@@ -712,28 +714,10 @@ const App = () => {
     campuses.forEach((c) => loadGroupCampus(c.id, { page: 1, promo: globalPromo }));
   }, [me, selectedCampusId, globalPageSize, globalPromo, campuses]);
 
-  // Whenever the holders list resolves and it includes Khouribga/Benguerir with real
-  // holders, quietly kick off (or reuse the cache of) the per-campus raw Paris-adders scan
-  // (powers the ✈️ badge on existing holder cards) — doesn't block or slow down the holders
-  // list itself.
-  useEffect(() => {
-    if (!achievementResult) { return; }
-    // Which campuses actually have holders shown right now changes over time (Tétouan, once
-    // always empty, now genuinely has some) — so this runs for any campus with holders,
-    // not a fixed hardcoded pair.
-    if (achievementResult.holders?.length > 0 && selectedCampusId) {
-      loadParisAdders(Number(selectedCampusId));
-    }
-  }, [achievementResult]);
-
-  // Same as above, but for "All Morocco" — one campus's group resolving with holders
-  // triggers that campus's own Paris-adders scan.
-  useEffect(() => {
-    if (selectedCampusId) { return; }
-    Object.entries(groupResults).forEach(([campusId, res]) => {
-      if (res?.holders?.length > 0) { loadParisAdders(Number(campusId)); }
-    });
-  }, [groupResults, selectedCampusId]);
+  // (Removed: a full-roster Paris-adders scan, ~115 API calls per campus per hour, that used to
+  // run whenever a campus's holders loaded, only to power a ✈️ badge for holders whose Paris
+  // row is primary. Holders are now classified by real primary campus server-side, so a
+  // holder can never be Paris-primary and that badge could never show.)
 
   // Triggers the DISPLAY-paginated Paris-adders fetch (Tétouan/Rabat's own fallback view)
   // once a campus's holders result comes back empty on page 1 — mirrors how the holders

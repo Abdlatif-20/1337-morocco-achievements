@@ -1,3 +1,5 @@
+import Avatar from './Avatar.jsx';
+
 const levelInt = (l) => Math.floor(l);
 const levelPct = (l) => Math.min(Math.round((l % 1) * 100), 100);
 
@@ -20,13 +22,15 @@ const StudentDetailModal = ({ login, profile, loading, error, onClose }) => {
         {profile && (
           <>
             <div className="profile-hero">
-              {profile.imageUrl ? (
-                <img className="profile-avatar" src={profile.imageUrl} alt={profile.displayName} style={{ borderColor: coalitionColor }} />
-              ) : (
-                <div className="profile-avatar profile-avatar-fallback" style={{ background: coalitionColor }}>
-                  {profile.displayName.slice(0, 2).toUpperCase()}
-                </div>
-              )}
+              <Avatar
+                url={profile.imageUrl}
+                alt={profile.displayName}
+                className="profile-avatar"
+                fallbackClassName="profile-avatar-fallback"
+                fallback={profile.displayName.slice(0, 2).toUpperCase()}
+                style={{ borderColor: coalitionColor }}
+                fallbackStyle={{ background: coalitionColor }}
+              />
               <h2>{profile.displayName}</h2>
               <span className="profile-login" style={{ color: coalitionColor }}>@{profile.login}</span>
               {profile.isStaff ? (

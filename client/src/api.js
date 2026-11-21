@@ -11,6 +11,10 @@ const request = async (path, options = {}) => {
 
 export const fetchCampuses = () => request('/api/campuses');
 
+// 42 photo URLs (cdn.intra.42.fr) return 403 unless the request carries a 42 token, so the
+// browser can't load them directly — they go through the server's authenticated proxy.
+export const avatarSrc = (url) => (url ? `/api/avatar?url=${encodeURIComponent(url)}` : null);
+
 export const fetchStudentProfile = (login) =>
   request(`/api/students/${encodeURIComponent(login)}/profile`);
 

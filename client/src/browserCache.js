@@ -3,7 +3,9 @@
 // own in-memory caches (see server/index.js) so both layers expire together. Wrapped in
 // try/catch throughout: localStorage can throw (private browsing, quota, disabled storage)
 // and none of that should ever break the app, just fall back to "no cache".
-const PREFIX = '1337-cache:';
+// Bump the version whenever the server's data shape or meaning changes, so visitors don't keep
+// rendering stale lists for up to an hour (v2: holders now classified by real primary campus).
+const PREFIX = '1337-cache-v2:';
 
 export const readCache = (key, ttlMs) => {
   try {
