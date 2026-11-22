@@ -348,6 +348,11 @@ const CAMPUS_NAME_LOOKUP = {
 // 42's achievement-holders query filters by CURRENT primary campus and can no longer see them.
 const PARIS_SWITCH_SINCE = new Date(new Date().getFullYear(), 7, 1); // August 1st, this year
 
+// Switchers are listed most recent move first (name breaks ties). Sorted server-side, before
+// pagination slices the list, so every page continues the same newest → oldest order.
+const bySwitchedAtDesc = (a, b) =>
+  (new Date(b.switchedAt || 0) - new Date(a.switchedAt || 0)) || a.displayName.localeCompare(b.displayName);
+
 let appTokenCache = null; // { token, expiresAt }
 
 const getAppToken = async () => {
@@ -865,7 +870,7 @@ const buildAchieverIndex = async (achievementId) => {
       return { ...mapAchievementHolder(u), campusId: m.campusId, recentParisMove: true, switchedAt: m.switchedAt };
     })
     .filter(Boolean)
-    .sort(byName);
+    .sort(bySwitchedAtDesc);
 
   return { holdersByCampus, switchers };
 };
@@ -989,7 +994,7 @@ app.get('/api/achievements/paris-switchers', requireAuth, async (req, res) => {
       const seen = new Set(allSwitchers.map((s) => s.login));
       const extra = (await getRosterParisSwitchers(id)).filter((s) => !seen.has(s.login));
       if (extra.length > 0) {
-        allSwitchers = [...allSwitchers, ...extra].sort((a, b) => a.displayName.localeCompare(b.displayName));
+        allSwitchers = [...allSwitchers, ...extra].sort(bySwitchedAtDesc);
       }
     }
 

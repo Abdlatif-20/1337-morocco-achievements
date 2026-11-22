@@ -334,7 +334,9 @@ const RecentParisSwitchersSection = ({
     );
   }
 
-  const sorted = [...students].sort((a, b) => a.displayName.localeCompare(b.displayName));
+  // Server already orders switchers newest move → oldest across all pages; keep that order
+  // (re-sorting by name here would scramble it within each page).
+  const sorted = students;
   const knownTotal = total ?? result?.total ?? null;
 
   return (
